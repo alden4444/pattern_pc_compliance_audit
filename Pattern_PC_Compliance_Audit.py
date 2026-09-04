@@ -51,7 +51,7 @@ def get_os():
 def macos():
     data = {
         "os_distro": "macOS",
-        "auto_updates": "Yes (Drata Enforced)",
+        "auto_updates": "Yes",
         "unsupported_removed": "Yes",
     }
 
@@ -177,7 +177,7 @@ def macos():
 def arch():
     data = {
         "os_distro": "Arch Linux",
-        "auto_updates": "Yes (Drata Enforced)",
+        "auto_updates": "Yes",
         "unsupported_removed": "Yes",
     }
 
@@ -322,7 +322,7 @@ def arch():
 def ubuntu():
     data = {
         "os_distro": "Ubuntu",
-        "auto_updates": "Yes (Drata Enforced)",
+        "auto_updates": "Yes",
         "unsupported_removed": "Yes",
     }
 
@@ -443,7 +443,7 @@ def ubuntu():
 def windows():
     data = {
         "os_distro": "Windows",
-        "auto_updates": "Yes (Drata Enforced)",
+        "auto_updates": "Yes",
         "unsupported_removed": "Yes",
     }
 
@@ -554,30 +554,138 @@ def windows():
 
     return data
 
+def setup_firewall(system):
+    print("\n[!] Firewall is disabled. Attempting automatic remediation...")
+    if system in ["Arch", "Ubuntu"]:
+        script_path = Path(__file__).parent / "setup_firewall.sh"
+        if script_path.is_file():
+            try:
+                subprocess.run(["sudo", str(script_path)], check=True)
+            except Exception as e:
+                print(f"[!] Failed to run setup_firewall.sh: {e}")
+        else:
+            print(f"[!] {script_path} not found.")
+    elif system == "macOS":
+        print("[+] Enabling macOS Application Firewall...")
+        try:
+            subprocess.run(
+                ["sudo", "/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"],
+                check=True
+            )
+        except Exception as e:
+            print(f"[!] Failed to enable macOS firewall: {e}")
+    elif system == "Windows":
+        print("[+] Enabling Windows Defender Firewall across all profiles...")
+        try:
+            subprocess.run(
+                ["powershell", "-Command", "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True"],
+                check=True
+            )
+        except Exception as e:
+            print(f"[!] Failed to enable Windows firewall: {e}")
+
+def report(results, system):
+    print("\n" + "=" * 65)
+    print("           COMPLIANCE REPORT")
+    print("=" * 65)
+
+    # 1. Firewall Status
+    fw_pass = "Yes" in results.get("firewall", "")
+    print(f"[{'PASS' if fw_pass else 'FAIL'}] Firewall Protection: {results.get('firewall')}")
+
+    # 2. Web Threat Filtering
+    web_pass = "Yes" in results.get("web_scanning", "")
+    print(f"[{'PASS' if web_pass else 'FAIL'}] Website Threat Scanning: {results.get('web_scanning')}")
+
+    # 3. Privilege Separation
+    admin_pass = results.get("admin_separated") == "Yes"
+    print(f"[{'PASS' if admin_pass else 'FAIL'}] Admin Account Separation: {results.get('admin_separated')}")
+
+    # 4. Anti-Virus
+    av_pass = results.get("anti_virus") not in ["None", "Unknown"]
+    print(f"[{'PASS' if av_pass else 'FAIL'}] Anti-Virus Software: {results.get('anti_virus')}")
+
+    print("=" * 65)
+
+    # Guidance for remaining manual items
+    if not (fw_pass and web_pass and admin_pass and av_pass):
+        print("\nACTION ITEMS REQUIRED TO COMPLETE COMPLIANCE:")
+
+        if not fw_pass:
+            print("\n• Firewall Setup (Step 4 in Laptop Policy):")
+            if system == "macOS":
+                print("  Go to System Settings > Network > Firewall, turn On, and set incoming to deny.")
+            elif system == "Windows":
+                print("  Open Settings (Win + I) > Privacy & security > Windows Security > Firewall & network protection.")
+                print("  Turn On Domain, Private, and Public network profiles.")
+            else:
+                print("  Run: sudo ./setup_firewall.sh")
+            print("  Note: If any inbound ports are opened, log them in 'Firewall Exceptions & Justifications'.")
+
+        if not web_pass:
+            print("\n• Website Scanning (Step 3 in Laptop Policy):")
+            if system == "Windows":
+                print("  Enable SmartScreen under Windows Security > App & browser control > Reputation-based protection.")
+            else:
+                print("  Install the Bitdefender TrafficLight Chrome extension:")
+                print("  https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
+                print("  Confirm it is active and shows 'This page is safe' with a green checkmark.")
+
+        if not admin_pass:
+            print("\n• Admin Account Separation (Step 5 in Laptop Policy):")
+            if system == "Ubuntu":
+                print("  1. Create a separate admin: sudo adduser <name>-admin && sudo adduser <name>-admin sudo")
+                print("  2. Remove standard user:   sudo deluser <name> sudo")
+                print("  (Or configure root password elevation via 'sudo visudo' with 'Defaults targetpw').")
+            elif system == "Arch":
+                print("  1. Create a separate admin: sudo useradd -m -G wheel <name>-admin && sudo passwd <name>-admin")
+                print("  2. Remove standard user:   sudo gpasswd -d <name> wheel")
+            elif system == "macOS":
+                print("  1. System Settings > Users & Groups: Create a new Administrator account.")
+                print("  2. Demote your daily account to 'Standard'. Disable automatic login.")
+            elif system == "Windows":
+                print("  1. Create a separate local identity (e.g., <name>-admin) and add to Administrators.")
+                print("  2. Demote your daily account to Standard User.")
+
+        if not av_pass:
+            print("\n• Anti-Virus Missing:")
+            print("  Install an active anti-malware package (e.g., ClamAV for Linux, Defender for Windows).")
+
+    print("\nFINAL STEP:")
+    print("Copy the raw compliance table values into your row on the IT Device Tracking Sheet.")
+    print("Ensure your lock screen requires a PIN/password of at least 6 characters and locks on inactivity.")
+    print("=" * 65 + "\n")
 
 def main():
     system = get_os()
     print(f"Detected Platform: {system}\n")
 
     if system == "Arch":
-        results = arch()
+        audit_fn = arch
     elif system == "macOS":
-        results = macos()
+        audit_fn = macos
     elif system == "Ubuntu":
-        results = ubuntu()
+        audit_fn = ubuntu
     elif system == "Windows":
-        results = windows()
+        audit_fn = windows
     else:
         print(f"Unsupported OS: {system}")
         return
 
+    results = audit_fn()
+
+    if "No" in results.get("firewall", ""):
+        setup_firewall(system)
+        results = audit_fn()
+
     print("=" * 65)
-    print(f"PC COMPLIANCE RESULTS ({system})")
+    print(f"RAW AUDIT DATA FOR TRACKER ({system})")
     print("=" * 65)
     for key, value in results.items():
         print(f"{key.ljust(24)}: {value}")
     print("=" * 65)
 
+    report(results, system)
 
 if __name__ == "__main__":
     main()
