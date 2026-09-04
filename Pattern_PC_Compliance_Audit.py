@@ -19,7 +19,7 @@ def get_os():
     elif os_name == "linux":
         distro = "Unknown"
         try:
-            if hassattr(platform, "freedesktop_os_release"):
+            if hasattr(platform, "freedesktop_os_release"):
                 distro = platform.freedesktop_os_release().get("ID", "Unknown")
             else:
                 with open("/etc/os-release", "r") as f:
@@ -86,19 +86,7 @@ def macos():
         "Firefox": "/Applications/Firefox.app",
         "Safari": "/System/Applications/Safari.app",
         "Brave": "/Applications/Brave Browser.app",
-    ~ via 🐍 v3.14.7 
-❯ ./Pattern_PC_Compliance_Audit.py
-/home/alden/./Pattern_PC_Compliance_Audit.py:171: SyntaxWarning: 'str' object is not callable; perhaps you missed a comma?
-  data["os_version"] = f"Rolling" ({platform.release()})
-Traceback (most recent call last):
-  File "/home/alden/./Pattern_PC_Compliance_Audit.py", line 187, in <module>
-    arch()
-    ~~~~^^
-  File "/home/alden/./Pattern_PC_Compliance_Audit.py", line 171, in arch
-    data["os_version"] = f"Rolling" ({platform.release()})
-                         ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
-TypeError: 'str' object is not callable}
-
+        }
     found_browsers = []
     for name, path in browser_paths.items():
         version = get_app_version(path)
@@ -183,7 +171,7 @@ def arch():
     data["os_version"] = f"Rolling ({platform.release()})"
 
     uuid_path = Path("/sys/class/dmi/id/product_uuid")
-    serial_path = Path("/sys/class/dmi/product_serial")
+    serial_path = Path("/sys/class/dmi/id/product_serial")
 
     try:
         if uuid_path.is_file():
@@ -301,3 +289,20 @@ def arch():
                 data["firewall"] = "No (Disabled)"
     except Exception:
         data["firewall"] = "Unknown"
+
+    try:
+        current_user = getpass.getuser()
+        user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+
+        if "wheel" in user_groups or "sudo" in user_groups:
+            data["admin_separated"] = (
+                f"FAIL (User '{current_user}' has sudo/wheel privileges)"
+            )
+        else:
+            data["admin_separated"] = "Yes"
+    except Exception:
+        data["admin_separated"] = "Manual check required"
+
+    return data
+
+def main()
