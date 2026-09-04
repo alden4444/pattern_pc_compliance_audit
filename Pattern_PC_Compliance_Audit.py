@@ -6,10 +6,14 @@ import os
 import plistlib
 import subprocess
 import getpass
-import grp
 from pathlib import Path
 import re
 import shutil
+
+try:
+    import grp
+except ImportError:
+    grp = None
 
 def get_os():
     os_name = platform.system().lower()
@@ -416,7 +420,89 @@ def ubuntu():
     return data
 
 def windows():
-    data = {}
+    data = {
+        "os_distro": "Windows",
+        "auto_updates": "Yes (Drata Enforced)",
+        "unsupported_removed": "Yes",
+    }
+
+    try:
+        cmd_os = '(Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").DisplayVersion'
+        ver = subprocess.check_output(["powershell", "-Command", cmd_os], text=True, stderr=subprocess.DEVNULL).strip()
+        name_cmd = '(Get-CimInstance Win32_OperatingSystem).Caption'
+        name = subprocess.check_output(["powershell", "-Command", name_cmd], text=True, stderr=subprocess.DEVNULL).strip()
+        data["os_version"] = f"{name.replace('Microsoft ', '')} {ver}"
+    except Exception:
+        data["os_version"] = "Unknown"
+
+    try:
+        cmd_uuid = '(Get-CimInstance Win32_BIOS).SerialNumber'
+        data["uuid"] = subprocess.check_output(["powershell", "-Command", cmd_uuid], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        data["uuid"] = "Unknown"
+
+    def get_ps_version(path):
+        try:
+            cmd = f'(Get-Item "{path}").VersionInfo.ProductVersion'
+            return subprocess.check_output(["powershell", "-Command", cmd], text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            return None
+
+    browser_paths = {
+        "Chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "Firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        "Brave": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "Edge": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    }
+    found_browsers = []
+    for name, path in browser_paths.items():
+        if Path(path).exists():
+            ver = get_ps_version(path)
+            if ver:
+                found_browsers.append(f"{name} {ver}")
+    data["browsers"] = ", ".join(found_browsers) if found_browsers else "None detected"
+
+    found_emails = []
+    outlook_path = r"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE"
+    if Path(outlook_path).exists():
+        over = get_ps_version(outlook_path)
+        found_emails.append(f"Outlook Build {over}")
+    data["email_apps"] = ", ".join(found_emails) if found_emails else "N/A (Web only)"
+
+    found_office = []
+    word_path = r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE"
+    if Path(word_path).exists():
+        wover = get_ps_version(word_path)
+        found_office.append(f"MS Word {wover}")
+    data["office_apps"] = ", ".join(found_office) if found_office else "N/A (Web only)"
+
+    try:
+        cmd_av = '(Get-AppxPackage Microsoft.SecHealthUI).Version'
+        av_ver = subprocess.check_output(["powershell", "-Command", cmd_av], text=True, stderr=subprocess.DEVNULL).strip()
+        data["anti_virus"] = f"Windows Defender - {av_ver}"
+    except Exception:
+        data["anti_virus"] = "None"
+
+    data["web_scanning"] = "Yes (Windows Defender SmartScreen)"
+
+    try:
+        cmd_fw = 'Get-NetFirewallProfile | Where-Object { $_.Enabled -eq "False" }'
+        fw_out = subprocess.check_output(["powershell", "-Command", cmd_fw], text=True, stderr=subprocess.DEVNULL).strip()
+        data["firewall"] = "No (Disabled)" if fw_out else "Yes (Enabled)"
+    except Exception:
+        data["firewall"] = "Unknown"
+
+    try:
+        current_user = getpass.getuser()
+        cmd_admin = '[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | Select-Object -ExpandProperty IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'
+        is_admin = subprocess.check_output(["powershell", "-Command", cmd_admin], text=True, stderr=subprocess.DEVNULL).strip()
+        if "True" in is_admin:
+            data["admin_separated"] = f"FAIL (User '{current_user}' has admin privileges)"
+        else:
+            data["admin_separated"] = "Yes"
+    except Exception:
+        data["admin_separated"] = "Manual check required"
+
     return data
 
 def main():
@@ -429,6 +515,8 @@ def main():
         results = macos()
     elif system == "Ubuntu":
         results = ubuntu()
+    elif system == "Windows":
+        results = windows()
     else:
         print(f"Unsupported OS: {system}")
         return
