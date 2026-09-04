@@ -1,0 +1,22 @@
+name: Test macOS Audit Script
+
+on:
+  workflow_dispatch: # Allows manual button-click run in GitHub UI
+  push:
+    branches: [ main, master ]
+
+jobs:
+  run-audit-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run Audit
+        run: |
+          python3 Pattern_PC_Compliance_Audit.py

@@ -86,7 +86,7 @@ def macos():
         "Firefox": "/Applications/Firefox.app",
         "Safari": "/System/Applications/Safari.app",
         "Brave": "/Applications/Brave Browser.app",
-        }
+    }
     found_browsers = []
     for name, path in browser_paths.items():
         version = get_app_version(path)
@@ -150,12 +150,13 @@ def macos():
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        if "is a member" in check.stdout.lower():
-            data["admin_separated"] = (
-                f"FAIL (User \"{current_user}\" has admin privileges)"
-            )
-        else:
+        output = check.stdout.lower()
+        if "is not a member" in output:
             data["admin_separated"] = "Yes"
+        elif "is a member" in output:
+            data["admin_separated"] = f"FAIL (User '{current_user}' has admin privileges)"
+        else:
+            data["admin_separated"] = "Manual check required"
     except Exception:
         data["admin_separated"] = "Manual check required"
 
@@ -188,7 +189,7 @@ def arch():
         if not path:
             return None
         try:
-            out = subprocess.check.output(
+            out = subprocess.check_output(
                     [path, "--version"], text=True, stderr=subprocess.DEVNULL
                     )
             match = re.search(r"(\d+(?:\.\d+)+)", out)
@@ -305,4 +306,34 @@ def arch():
 
     return data
 
-def main()
+def ubuntu():
+    data = {}
+    return data
+
+def windows():
+    data = {}
+    return data
+
+def main():
+    system = get_os()
+    print(f"Detected Platform: {system}\n")
+
+    if system == "Arch":
+        results = arch()
+    elif system == "macOS":
+        results = macos()
+    elif system == "Ubuntu":
+        results = ubuntu()
+    else:
+        print(f"Unsupported OS: {system}")
+        return
+
+    print("=" * 65)
+    print(f"PC COMPLIANCE RESULTS ({system})")
+    print("=" * 65)
+    for key, value in results.items():
+        print(f"{key.ljust(24)}: {value}")
+    print("=" * 65)
+
+if __name__ == "__main__":
+    main()
