@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 
-import platform
-import sys
-import os
-import plistlib
-import subprocess
 import getpass
+import os
 from pathlib import Path
+import platform
+import plistlib
 import re
 import shutil
+import subprocess
 
 try:
     import grp
 except ImportError:
     grp = None
+
 
 def get_os():
     os_name = platform.system().lower()
@@ -36,10 +36,8 @@ def get_os():
 
         if distro == "arch":
             return "Arch"
-
         elif distro == "ubuntu":
             return "Ubuntu"
-
         else:
             return "Unknown"
 
@@ -48,6 +46,7 @@ def get_os():
 
     else:
         return "Unknown"
+
 
 def macos():
     data = {
@@ -75,14 +74,22 @@ def macos():
         data["uuid"] = "Unknown"
 
     def get_app_version(app_path):
-        plist_path = Path(app_path) / "Contents" / "Info.plist"
-        if plist_path.is_file():
-            try:
-                with open(plist_path, "rb") as fp:
-                    plist = plistlib.load(fp)
-                    return plist.get("CFBundleShortVersionString", "Unknown")
-            except Exception:
-                return "Unknown"
+        plist_candidates = [
+            Path(app_path) / "Contents" / "Info.plist",
+            Path(app_path) / "Contents" / "Resources" / "Info.plist",
+            Path(app_path) / "Resources" / "Info.plist",
+            Path(app_path) / "Info.plist",
+        ]
+        for plist_path in plist_candidates:
+            if plist_path.is_file():
+                try:
+                    with open(plist_path, "rb") as fp:
+                        plist = plistlib.load(fp)
+                        return plist.get("CFBundleShortVersionString") or plist.get(
+                            "CFBundleVersion", "Unknown"
+                        )
+                except Exception:
+                    return "Unknown"
         return None
 
     browser_paths = {
@@ -166,12 +173,13 @@ def macos():
 
     return data
 
+
 def arch():
     data = {
-            "os_distro": "Arch Linux",
-            "auto_updates": "Yes (Drata Enforced)",
-            "unsupported_removed": "Yes"
-            }
+        "os_distro": "Arch Linux",
+        "auto_updates": "Yes (Drata Enforced)",
+        "unsupported_removed": "Yes",
+    }
 
     data["os_version"] = f"Rolling ({platform.release()})"
 
@@ -187,18 +195,17 @@ def arch():
             data["uuid"] = "Unknown"
     except Exception:
         data["uuid"] = "Unknown"
-    
+
     def get_bin_version(binary_name):
         path = shutil.which(binary_name)
         if not path:
             return None
         try:
             out = subprocess.check_output(
-                    [path, "--version"], text=True, stderr=subprocess.DEVNULL
-                    )
+                [path, "--version"], text=True, stderr=subprocess.DEVNULL
+            )
             match = re.search(r"(\d+(?:\.\d+)+)", out)
             return match.group(1) if match else "Installed"
-
         except Exception:
             try:
                 pkg_out = subprocess.check_output(
@@ -252,7 +259,6 @@ def arch():
     )
 
     clam_ver = get_bin_version("clamscan")
-
     if clam_ver:
         data["anti_virus"] = f"ClamAV {clam_ver}"
     elif Path("/opt/bitdefender-security-tools").exists():
@@ -278,7 +284,7 @@ def arch():
         res = subprocess.run(
             ["systemctl", "is-active", "ufw"],
             capture_output=True,
-            text=True
+            text=True,
         )
         if "active" in res.stdout.strip().lower():
             data["firewall"] = "Yes (Enabled)"
@@ -286,7 +292,7 @@ def arch():
             ufw_out = subprocess.run(
                 ["ufw", "status"],
                 capture_output=True,
-                text=True
+                text=True,
             )
             if "status: active" in ufw_out.stdout.lower():
                 data["firewall"] = "Yes (Enabled)"
@@ -297,18 +303,21 @@ def arch():
 
     try:
         current_user = getpass.getuser()
-        user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
-
-        if "wheel" in user_groups or "sudo" in user_groups:
-            data["admin_separated"] = (
-                f"FAIL (User '{current_user}' has sudo/wheel privileges)"
-            )
+        if grp:
+            user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+            if "wheel" in user_groups or "sudo" in user_groups:
+                data["admin_separated"] = (
+                    f"FAIL (User '{current_user}' has sudo/wheel privileges)"
+                )
+            else:
+                data["admin_separated"] = "Yes"
         else:
-            data["admin_separated"] = "Yes"
+            data["admin_separated"] = "Manual check required"
     except Exception:
         data["admin_separated"] = "Manual check required"
 
     return data
+
 
 def ubuntu():
     data = {
@@ -391,8 +400,14 @@ def ubuntu():
     else:
         data["anti_virus"] = "None"
 
-    chrome_ext = Path.home() / ".config/google-chrome/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
-    chromium_ext = Path.home() / ".config/chromium/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
+    chrome_ext = (
+        Path.home()
+        / ".config/google-chrome/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
+    )
+    chromium_ext = (
+        Path.home()
+        / ".config/chromium/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
+    )
     if chrome_ext.exists() or chromium_ext.exists():
         data["web_scanning"] = "Yes (Bitdefender TrafficLight)"
     else:
@@ -409,15 +424,21 @@ def ubuntu():
 
     try:
         current_user = getpass.getuser()
-        user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
-        if "sudo" in user_groups:
-            data["admin_separated"] = f"FAIL (User '{current_user}' has sudo privileges)"
+        if grp:
+            user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+            if "sudo" in user_groups:
+                data["admin_separated"] = (
+                    f"FAIL (User '{current_user}' has sudo privileges)"
+                )
+            else:
+                data["admin_separated"] = "Yes"
         else:
-            data["admin_separated"] = "Yes"
+            data["admin_separated"] = "Manual check required"
     except Exception:
         data["admin_separated"] = "Manual check required"
 
     return data
+
 
 def windows():
     data = {
@@ -428,23 +449,39 @@ def windows():
 
     try:
         cmd_os = '(Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").DisplayVersion'
-        ver = subprocess.check_output(["powershell", "-Command", cmd_os], text=True, stderr=subprocess.DEVNULL).strip()
-        name_cmd = '(Get-CimInstance Win32_OperatingSystem).Caption'
-        name = subprocess.check_output(["powershell", "-Command", name_cmd], text=True, stderr=subprocess.DEVNULL).strip()
+        ver = subprocess.check_output(
+            ["powershell", "-Command", cmd_os],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        name_cmd = "(Get-CimInstance Win32_OperatingSystem).Caption"
+        name = subprocess.check_output(
+            ["powershell", "-Command", name_cmd],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         data["os_version"] = f"{name.replace('Microsoft ', '')} {ver}"
     except Exception:
         data["os_version"] = "Unknown"
 
     try:
-        cmd_uuid = '(Get-CimInstance Win32_BIOS).SerialNumber'
-        data["uuid"] = subprocess.check_output(["powershell", "-Command", cmd_uuid], text=True, stderr=subprocess.DEVNULL).strip()
+        cmd_uuid = "(Get-CimInstance Win32_BIOS).SerialNumber"
+        data["uuid"] = subprocess.check_output(
+            ["powershell", "-Command", cmd_uuid],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except Exception:
         data["uuid"] = "Unknown"
 
     def get_ps_version(path):
         try:
             cmd = f'(Get-Item "{path}").VersionInfo.ProductVersion'
-            return subprocess.check_output(["powershell", "-Command", cmd], text=True, stderr=subprocess.DEVNULL).strip()
+            return subprocess.check_output(
+                ["powershell", "-Command", cmd],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
         except Exception:
             return None
 
@@ -452,7 +489,7 @@ def windows():
         "Chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         "Firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe",
         "Brave": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        "Edge": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        "Edge": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     }
     found_browsers = []
     for name, path in browser_paths.items():
@@ -477,8 +514,12 @@ def windows():
     data["office_apps"] = ", ".join(found_office) if found_office else "N/A (Web only)"
 
     try:
-        cmd_av = '(Get-AppxPackage Microsoft.SecHealthUI).Version'
-        av_ver = subprocess.check_output(["powershell", "-Command", cmd_av], text=True, stderr=subprocess.DEVNULL).strip()
+        cmd_av = "(Get-AppxPackage Microsoft.SecHealthUI).Version"
+        av_ver = subprocess.check_output(
+            ["powershell", "-Command", cmd_av],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         data["anti_virus"] = f"Windows Defender - {av_ver}"
     except Exception:
         data["anti_virus"] = "None"
@@ -487,15 +528,23 @@ def windows():
 
     try:
         cmd_fw = 'Get-NetFirewallProfile | Where-Object { $_.Enabled -eq "False" }'
-        fw_out = subprocess.check_output(["powershell", "-Command", cmd_fw], text=True, stderr=subprocess.DEVNULL).strip()
+        fw_out = subprocess.check_output(
+            ["powershell", "-Command", cmd_fw],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         data["firewall"] = "No (Disabled)" if fw_out else "Yes (Enabled)"
     except Exception:
         data["firewall"] = "Unknown"
 
     try:
         current_user = getpass.getuser()
-        cmd_admin = '[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | Select-Object -ExpandProperty IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'
-        is_admin = subprocess.check_output(["powershell", "-Command", cmd_admin], text=True, stderr=subprocess.DEVNULL).strip()
+        cmd_admin = "[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | Select-Object -ExpandProperty IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+        is_admin = subprocess.check_output(
+            ["powershell", "-Command", cmd_admin],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         if "True" in is_admin:
             data["admin_separated"] = f"FAIL (User '{current_user}' has admin privileges)"
         else:
@@ -504,6 +553,7 @@ def windows():
         data["admin_separated"] = "Manual check required"
 
     return data
+
 
 def main():
     system = get_os()
@@ -527,6 +577,7 @@ def main():
     for key, value in results.items():
         print(f"{key.ljust(24)}: {value}")
     print("=" * 65)
+
 
 if __name__ == "__main__":
     main()
