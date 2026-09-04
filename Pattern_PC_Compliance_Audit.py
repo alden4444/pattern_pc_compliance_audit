@@ -307,7 +307,112 @@ def arch():
     return data
 
 def ubuntu():
-    data = {}
+    data = {
+        "os_distro": "Ubuntu",
+        "auto_updates": "Yes (Drata Enforced)",
+        "unsupported_removed": "Yes",
+    }
+
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("VERSION_ID="):
+                    data["os_version"] = line.split("=")[1].strip().strip('"')
+                    break
+    except Exception:
+        data["os_version"] = "Unknown"
+
+    uuid_path = Path("/sys/class/dmi/id/product_uuid")
+    serial_path = Path("/sys/class/dmi/id/product_serial")
+    try:
+        if uuid_path.is_file():
+            data["uuid"] = uuid_path.read_text().strip()
+        elif serial_path.is_file():
+            data["uuid"] = serial_path.read_text().strip()
+        else:
+            data["uuid"] = "Unknown"
+    except Exception:
+        data["uuid"] = "Unknown"
+
+    def get_bin_version(binary_name, pkg_name=None):
+        if not pkg_name:
+            pkg_name = binary_name
+        path = shutil.which(binary_name)
+        if path:
+            try:
+                out = subprocess.check_output(
+                    [path, "--version"], text=True, stderr=subprocess.DEVNULL
+                )
+                match = re.search(r"(\d+(?:\.\d+)+)", out)
+                if match:
+                    return match.group(1)
+            except Exception:
+                pass
+        try:
+            pkg_out = subprocess.check_output(
+                ["dpkg-query", "-W", "-f=${Version}", pkg_name],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            if pkg_out:
+                return pkg_out.strip()
+        except Exception:
+            return None
+        return None
+
+    browser_targets = [
+        ("Chrome", "google-chrome", "google-chrome-stable"),
+        ("Chromium", "chromium-browser", "chromium-browser"),
+        ("Firefox", "firefox", "firefox"),
+        ("Brave", "brave", "brave-browser"),
+    ]
+    found_browsers = []
+    for disp, bin_name, pkg in browser_targets:
+        ver = get_bin_version(bin_name, pkg)
+        if ver:
+            found_browsers.append(f"{disp} {ver}")
+    data["browsers"] = ", ".join(found_browsers) if found_browsers else "None detected"
+
+    tb_ver = get_bin_version("thunderbird")
+    data["email_apps"] = f"Thunderbird {tb_ver}" if tb_ver else "N/A (Web only)"
+
+    lo_ver = get_bin_version("libreoffice", "libreoffice-core")
+    data["office_apps"] = f"LibreOffice {lo_ver}" if lo_ver else "N/A (Web only)"
+
+    clam_ver = get_bin_version("clamscan", "clamav")
+    if clam_ver:
+        data["anti_virus"] = f"ClamAV {clam_ver}"
+    elif Path("/opt/bitdefender-security-tools").exists():
+        data["anti_virus"] = "Bitdefender Endpoint"
+    else:
+        data["anti_virus"] = "None"
+
+    chrome_ext = Path.home() / ".config/google-chrome/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
+    chromium_ext = Path.home() / ".config/chromium/Default/Extensions/cfnpidifppmenkapgihekkeednfoenal"
+    if chrome_ext.exists() or chromium_ext.exists():
+        data["web_scanning"] = "Yes (Bitdefender TrafficLight)"
+    else:
+        data["web_scanning"] = "No (Extension missing)"
+
+    try:
+        ufw_out = subprocess.run(["ufw", "status"], capture_output=True, text=True)
+        if "status: active" in ufw_out.stdout.lower():
+            data["firewall"] = "Yes (Enabled)"
+        else:
+            data["firewall"] = "No (Disabled)"
+    except Exception:
+        data["firewall"] = "Unknown"
+
+    try:
+        current_user = getpass.getuser()
+        user_groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+        if "sudo" in user_groups:
+            data["admin_separated"] = f"FAIL (User '{current_user}' has sudo privileges)"
+        else:
+            data["admin_separated"] = "Yes"
+    except Exception:
+        data["admin_separated"] = "Manual check required"
+
     return data
 
 def windows():
