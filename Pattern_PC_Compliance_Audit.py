@@ -17,8 +17,8 @@ try:
 except ImportError:
     grp = None
 
-# PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL HERE:
-WEBHOOK_URL = "https://script.google.com/macros/s/YOUR_ACTUAL_DEPLOYMENT_ID/exec"
+
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbysGXrmHrs8igDCIORukTCxJdTEObnArLHNaVbS4v8iWm6xFW2QVzMw20-6kQiLsgup/exec"
 
 
 def get_os():
