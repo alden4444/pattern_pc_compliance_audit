@@ -26,14 +26,11 @@ try:
 except ImportError:
     pwd = None
 
-
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbysGXrmHrs8igDCIORukTCxJdTEObnArLHNaVbS4v8iWm6xFW2QVzMw20-6kQiLsgup/exec"
-
-_APT_NONINTERACTIVE_BASE = ["env", "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a"]
+_APT_BASE = ["env", "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a"]
 
 
 def delay(seconds=0.6):
-    """Pace execution visually to give users clear, readable feedback."""
     if os.environ.get("CI") == "true" or "--fast" in sys.argv:
         return
     if not sys.stdin.isatty() and "--delay" not in sys.argv:
@@ -52,7 +49,7 @@ def log_success(message):
 
 
 def log_warning(message):
-    print(f"   Note: {message}", flush=True)
+    print(f"   Notice: {message}", flush=True)
     delay(0.3)
 
 
@@ -188,7 +185,7 @@ def get_linux_bin_version(binary_name):
 
 def disable_competing_linux_firewalls():
     if shutil.which("firewall-cmd") or shutil.which("firewalld"):
-        log_info("Disabling conflicting firewalld service...")
+        log_info("Stopping conflicting firewalld...")
         cmd_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
         _run(cmd_prefix + ["systemctl", "stop", "firewalld"], timeout=10)
         _run(cmd_prefix + ["systemctl", "disable", "firewalld"], timeout=10)
@@ -258,26 +255,26 @@ def check_windows_firewall():
 def enforce_firewall(system):
     if system in ["Arch", "Ubuntu", "Linux"]:
         if ufw_is_correctly_configured():
-            log_success("Host firewall active and enforcing baseline rules (deny incoming, allow outgoing).")
+            log_success("Firewall active and rules set.")
             return True
 
-        log_info("Configuring UFW baseline rules...")
+        log_info("Setting up UFW rules...")
         disable_competing_linux_firewalls()
 
         sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo"]
 
         if not shutil.which("ufw"):
-            log_info("Installing UFW packet filter...")
+            log_info("Installing UFW...")
             if system == "Ubuntu" and shutil.which("apt"):
-                subprocess.run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "update", "-y"], check=False)
-                subprocess.run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "install", "-y", "ufw"], check=False)
+                subprocess.run(sudo_prefix + _APT_BASE + ["apt", "update", "-y"], check=False)
+                subprocess.run(sudo_prefix + _APT_BASE + ["apt", "install", "-y", "ufw"], check=False)
             elif system == "Arch" and shutil.which("pacman"):
                 subprocess.run(sudo_prefix + ["pacman", "-S", "--noconfirm", "ufw"], check=False)
                 subprocess.run(sudo_prefix + ["systemctl", "enable", "--now", "ufw"], check=False)
 
         if not shutil.which("ufw"):
-            log_warning("Failed to install UFW. UFW is mandatory for Cyber Essentials compliance.")
-            print("    Please run manually: sudo pacman -S ufw (Arch) or sudo apt install ufw (Ubuntu)")
+            log_warning("Failed to install UFW.")
+            print("    Please install it manually: sudo pacman -S ufw (Arch) or sudo apt install ufw (Ubuntu)")
             return False
 
         allow_ssh_before_enabling_ufw()
@@ -288,37 +285,37 @@ def enforce_firewall(system):
             subprocess.run(sudo_prefix + ["systemctl", "enable", "--now", "ufw"], check=False)
 
         if ufw_is_correctly_configured():
-            log_success("Host firewall active and enforcing baseline rules.")
+            log_success("Firewall active and configured.")
             return True
         else:
-            log_warning("UFW installed but not reporting active status.")
-            print("    Run 'sudo ufw status verbose' manually to investigate.")
+            log_warning("UFW installed but not reporting active.")
+            print("    Check status with: sudo ufw status verbose")
             return False
 
     elif system == "macOS":
         if check_mac_firewall():
-            log_success("macOS Application Firewall is active.")
+            log_success("macOS firewall active.")
             return True
 
-        log_info("Enabling macOS Application Firewall...")
+        log_info("Enabling macOS firewall...")
         sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo"]
         fw_bin = "/usr/libexec/ApplicationFirewall/socketfilterfw"
         subprocess.run(sudo_prefix + [fw_bin, "--setglobalstate", "on"], check=False)
 
         if check_mac_firewall():
-            log_success("macOS Firewall active.")
+            log_success("macOS firewall enabled.")
             return True
         else:
-            log_warning("Could not automatically enable macOS Firewall.")
-            print("    Please enable manually: System Settings > Network > Firewall > Turn On.")
+            log_warning("Could not enable macOS firewall.")
+            print("    Enable manually: System Settings > Network > Firewall.")
             return False
 
     elif system == "Windows":
         if check_windows_firewall():
-            log_success("Windows Firewall is active across Domain, Public, and Private profiles.")
+            log_success("Windows Firewall active across all profiles.")
             return True
 
-        log_info("Enabling Windows Firewall profiles...")
+        log_info("Enabling Windows Firewall...")
         cmd = "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow"
         _run_powershell(cmd, timeout=20)
 
@@ -327,11 +324,11 @@ def enforce_firewall(system):
             _run_powershell(elevate_cmd, timeout=30)
 
         if check_windows_firewall():
-            log_success("Windows Firewall active.")
+            log_success("Windows Firewall enabled.")
             return True
         else:
-            log_warning("Could not automatically configure Windows Firewall.")
-            print("    Please enable manually in Windows Security > Firewall & network protection.")
+            log_warning("Could not configure Windows Firewall.")
+            print("    Enable manually in Windows Security > Firewall & network protection.")
             return False
 
     return False
@@ -395,15 +392,15 @@ def detect_antivirus(system):
 def fix_antivirus_background(system):
     current_av = detect_antivirus(system)
     if current_av != "None":
-        log_success(f"Anti-virus protection detected: {current_av}")
+        log_success(f"Anti-virus detected: {current_av}")
         return current_av
 
     if system in ["Ubuntu", "Arch", "Linux"]:
-        log_info("No anti-virus found. Installing ClamAV...")
+        log_info("Installing ClamAV...")
         sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
         if system == "Ubuntu" and shutil.which("apt"):
-            _run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "update", "-y"], timeout=120)
-            _run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "install", "-y", "clamav", "clamav-daemon"], timeout=180)
+            _run(sudo_prefix + _APT_BASE + ["apt", "update", "-y"], timeout=120)
+            _run(sudo_prefix + _APT_BASE + ["apt", "install", "-y", "clamav", "clamav-daemon"], timeout=180)
             _run(sudo_prefix + ["freshclam"], timeout=60)
         elif system == "Arch" and shutil.which("pacman"):
             _run(sudo_prefix + ["pacman", "-S", "--noconfirm", "clamav"], timeout=120)
@@ -415,10 +412,10 @@ def fix_antivirus_background(system):
             log_success(f"Anti-virus installed: {detected}")
             return detected
         else:
-            log_warning("ClamAV setup in progress. Please ensure signature updates complete.")
+            log_warning("ClamAV setup finished. Waiting on signature download.")
             return "ClamAV - Initializing"
     else:
-        log_success("System malware protection detected.")
+        log_success("Built-in malware protection active.")
         return "Active"
 
 
@@ -479,19 +476,18 @@ def setup_admin_separation(system):
         if dropin.exists():
             return True
 
-        print("\n    Cyber Essentials v3.3 requires that daily business activities are performed")
-        print("    without standard access to administrative powers. On Linux, we isolate root")
-        print("    elevation by requiring a distinct administrator/root password for sudo.\n")
+        print("\n    To isolate root elevation, sudo needs to require the root password")
+        print("    rather than your login account password.\n")
 
         if not sys.stdin.isatty():
-            log_info("Non-interactive session: skipping interactive root password setup.")
+            log_info("Non-interactive session: skipping root password prompt.")
             return False
 
-        print("    Please enter a new dedicated admin/root password when prompted:")
+        print("    Enter a dedicated root/admin password when prompted:")
         cmd = ["passwd", "root"] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "passwd", "root"]
         set_pw = subprocess.run(cmd)
         if set_pw.returncode != 0:
-            log_warning("Skipped setting admin password.")
+            log_warning("Root password was not set.")
             return False
 
         admin_rules = []
@@ -501,17 +497,16 @@ def setup_admin_separation(system):
                 admin_rules.append("%sudo ALL=(ALL:ALL) ALL")
             if "wheel" in all_system_groups:
                 admin_rules.append("%wheel ALL=(ALL:ALL) ALL")
-        
+
         if not admin_rules:
             admin_rules = ["ALL ALL=(ALL:ALL) ALL"]
 
         rule = (
-            "# Cyber Essentials Admin Separation Rule\n"
             "Defaults targetpw\n"
             "Defaults timestamp_timeout=0\n"
             + "\n".join(admin_rules) + "\n"
         )
-        
+
         temp_file = Path("/tmp/cyber_essentials_targetpw")
         try:
             temp_file.write_text(rule)
@@ -525,36 +520,32 @@ def setup_admin_separation(system):
                 else:
                     subprocess.run(["sudo", "cp", str(temp_file), str(dropin)], check=True)
                     subprocess.run(["sudo", "chmod", "0440", str(dropin)], check=True)
-                log_success("Administrative elevation successfully isolated via distinct root credentials.")
+                log_success("Root password elevation configured.")
                 return True
             else:
-                log_warning("Sudoers rule validation failed; reverting changes.")
+                log_warning("visudo syntax check failed; reverted.")
         except Exception as e:
-            log_warning(f"Error creating sudoers dropin: {e}")
+            log_warning(f"Failed to configure sudoers: {e}")
         finally:
             temp_file.unlink(missing_ok=True)
         return False
 
     elif system == "macOS":
-        print("\n    Cyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
-        print("    is conducted from a Standard User account, not an Administrator account.")
-        print("    Action required:")
-        print("      1. Open System Settings > Users & Groups.")
-        print("      2. Click 'Add Account' and create a dedicated Administrator account.")
-        print("      3. Edit your daily account and change its type from Administrator to Standard.")
-        print("      4. Log out and log back in to your Standard account.")
-        input("\n    Press [Enter] once your separate administrator account is configured...")
+        print("\n    Standard user account separation required:")
+        print("      1. Go to System Settings > Users & Groups.")
+        print("      2. Create an Administrator account.")
+        print("      3. Change your daily account type from Administrator to Standard.")
+        print("      4. Log out and log back in.")
+        input("\n    Press [Enter] once configured...")
         return True
 
     elif system == "Windows":
-        print("\n    Cyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
-        print("    is conducted from a Standard User account, not an Administrator account.")
-        print("    Action required:")
-        print("      1. Open Settings (Win + I) > Accounts > Other users.")
-        print("      2. Add a dedicated administrator account (e.g. 'admin-name') and grant it Administrator role.")
-        print("      3. Change your daily account type from Administrator to Standard User.")
-        print("      4. Sign out and sign back in to your daily Standard account.")
-        input("\n    Press [Enter] once your separate administrator account is configured...")
+        print("\n    Standard user account separation required:")
+        print("      1. Go to Settings > Accounts > Other users.")
+        print("      2. Add a separate admin account (e.g. 'admin-name').")
+        print("      3. Switch your daily account type to Standard User.")
+        print("      4. Sign out and sign back in.")
+        input("\n    Press [Enter] once configured...")
         return True
 
     return False
@@ -890,40 +881,39 @@ def run_audit(system):
 
 def print_summary_table(system, audit_data):
     delay(0.4)
-    print("\n" + "=" * 62)
-    print("        CYBER ESSENTIALS v3.3 COMPLIANCE AUDIT SUMMARY")
-    print("=" * 62)
+    print("\n" + "=" * 54)
+    print(f"      COMPLIANCE CHECK SUMMARY ({system.upper()})")
+    print("=" * 54)
     labels = [
-        ("Platform", system),
-        ("OS Distro", audit_data.get("os_distro")),
-        ("OS Version", audit_data.get("os_version")),
-        ("Hardware UUID/Serial", audit_data.get("uuid")),
-        ("Firewall Protection", audit_data.get("firewall")),
-        ("Anti-Virus Protection", audit_data.get("anti_virus")),
-        ("Website Threat Scanning", audit_data.get("web_scanning")),
+        ("OS", audit_data.get("os_distro")),
+        ("Version", audit_data.get("os_version")),
+        ("Device UUID/Serial", audit_data.get("uuid")),
+        ("Firewall", audit_data.get("firewall")),
+        ("Anti-Virus", audit_data.get("anti_virus")),
+        ("Web Threat Scanning", audit_data.get("web_scanning")),
         ("Privilege Separation", audit_data.get("admin_separated")),
-        ("Automatic Updates", audit_data.get("auto_updates")),
-        ("Detected Browsers", audit_data.get("browsers")),
-        ("Office Applications", audit_data.get("office_apps")),
-        ("Email Applications", audit_data.get("email_apps")),
-        ("Unsupported Apps Removed", audit_data.get("unsupported_removed")),
+        ("Auto Updates", audit_data.get("auto_updates")),
+        ("Browsers", audit_data.get("browsers")),
+        ("Office Apps", audit_data.get("office_apps")),
+        ("Email Apps", audit_data.get("email_apps")),
+        ("Legacy Apps Removed", audit_data.get("unsupported_removed")),
     ]
     for label, val in labels:
         status_tag = ""
-        if label in ["Firewall Protection", "Website Threat Scanning", "Privilege Separation"]:
-            status_tag = " (Pass)" if val == "Yes" else " (Fail)"
-        elif label == "Anti-Virus Protection":
-            status_tag = " (Pass)" if val not in ["None", "Unknown"] else " (Fail)"
-        print(f"{label.ljust(26)}: {val}{status_tag}")
-    print("=" * 62 + "\n")
+        if label in ["Firewall", "Web Threat Scanning", "Privilege Separation"]:
+            status_tag = " [OK]" if val == "Yes" else " [FAIL]"
+        elif label == "Anti-Virus":
+            status_tag = " [OK]" if val not in ["None", "Unknown"] else " [FAIL]"
+        print(f"{label.ljust(22)}: {val}{status_tag}")
+    print("=" * 54 + "\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pattern PC Compliance Setup & Audit (Cyber Essentials v3.3)")
-    parser.add_argument("--audit-only", "--test", action="store_true", help="Run audit checks without prompting or submitting")
-    parser.add_argument("--submit", action="store_true", help="Force submission even in non-interactive mode")
-    parser.add_argument("--delay", action="store_true", help="Force visual inspection delays even in non-interactive mode")
-    parser.add_argument("--fast", action="store_true", help="Bypass visual inspection delays")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--audit-only", "--test", action="store_true")
+    parser.add_argument("--submit", action="store_true")
+    parser.add_argument("--delay", action="store_true")
+    parser.add_argument("--fast", action="store_true")
     args = parser.parse_args()
 
     system = get_os()
@@ -931,78 +921,67 @@ def main():
     if system == "Windows":
         import ctypes
         if not ctypes.windll.shell32.IsUserAnAdmin():
-            print("Requesting Administrator privileges to run compliance checks...")
+            print("Requesting Administrator permissions...")
             ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
             sys.exit(0)
 
     home = get_real_home()
 
-    print("=" * 62)
-    print(f"      Pattern Device Compliance Setup & Audit ({system})")
-    print("=" * 62)
+    print("=" * 54)
+    print(f"      Device Compliance Audit ({system})")
+    print("=" * 54)
 
     is_automated = (not args.submit and (os.environ.get("CI") == "true" or not sys.stdin.isatty()))
 
-    # --- Phase 1: Device Scoping & Inventory ---
-    log_step("Initializing Cyber Essentials v3.3 verification engine")
+    log_step("Checking system identification")
     uuid_val = get_hardware_uuid(system)
     os_ver = get_os_version(system)
-    log_success(f"Device Identity : {uuid_val}")
-    log_success(f"Operating System: {system} {os_ver}")
+    log_success(f"ID: {uuid_val}")
+    log_success(f"OS: {system} {os_ver}")
 
-    # --- Phase 2: Host Firewall ---
-    log_step("Verifying host firewall baseline (inbound block, outbound allow)")
+    log_step("Checking firewall")
     enforce_firewall(system)
 
-    # --- Phase 3: Anti-Virus Software ---
-    log_step("Inspecting endpoint malware defense & signature status")
+    log_step("Checking anti-virus")
     fix_antivirus_background(system)
 
-    # --- Phase 4: Privilege Separation ---
-    log_step("Auditing user privilege isolation and administrator boundaries")
+    log_step("Checking admin separation")
     admin_sep = check_admin_separated(system)
     if admin_sep != "Yes":
-        log_warning("Administrative privileges detected on daily user account")
+        log_warning("Daily account has admin rights")
         if not is_automated and not args.audit_only:
             setup_admin_separation(system)
     else:
-        log_success("Privilege separation verified (Standard User daily login)")
+        log_success("Privilege separation confirmed")
 
-    # --- Phase 5: Malicious Website Threat Filtering ---
-    log_step("Checking malicious web threat scanning (Bitdefender TrafficLight)")
+    log_step("Checking web threat extension")
     web_ok = detect_web_scanning(system, home)
     if not web_ok:
-        log_warning("Web threat scanning extension not detected")
+        log_warning("TrafficLight not detected")
         if not is_automated and not args.audit_only:
-            print("\n    Cyber Essentials v3.3 requires malicious website scanning (Bitdefender TrafficLight).")
-            print("    Attempting to launch the extension store in your default browser...")
+            print("\n    Opening extension page...")
             open_url_safely("https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
 
-            print("\n    If the browser window didn't open automatically, please open it manually:")
+            print("\n    If your browser didn't open:")
             print("      • Chrome / Chromium / Brave / Edge:")
             print("        https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
             print("      • Firefox:")
             print("        https://addons.mozilla.org/en-US/firefox/addon/trafficlight/")
-            print("\n    Action required:")
-            print("      1. Click 'Add to Chrome' (or 'Add to Firefox') to install Bitdefender TrafficLight.")
-            print("      2. Click the extension icon in your browser toolbar and ensure it shows 'This page is safe' with a green checkmark.")
+            print("\n    Install the extension and ensure the green checkmark appears.")
 
-            ans = input("\n    Do you already have Bitdefender TrafficLight installed and active? [y/N]: ").strip().lower()
+            ans = input("\n    Do you already have Bitdefender TrafficLight active? [y/N]: ").strip().lower()
             if ans in ["y", "yes"]:
                 web_ok = True
             else:
-                input("\n    Press [Enter] once the extension is installed and active in your browser...")
+                input("\n    Press [Enter] once installed...")
                 web_ok = detect_web_scanning(system, home)
     else:
-        log_success("Malicious web threat scanning active")
+        log_success("Web threat scanning active")
 
-    # --- Phase 6: Software & Browser Inventory ---
-    log_step("Cataloging browser applications and system patching policy")
+    log_step("Checking browser inventory")
     browsers = detect_browsers(system, home)
-    log_success(f"Detected browsers: {browsers}")
-    log_success("Automatic updates: Enforced")
+    log_success(f"Browsers: {browsers}")
 
-    # --- Compile Audit Data ---
     final = run_audit(system)
     if web_ok:
         final["web_scanning"] = "Yes"
@@ -1010,22 +989,20 @@ def main():
     print_summary_table(system, final)
 
     if is_automated or args.audit_only:
-        print("Compliance audit checks completed.")
+        print("Audit complete.")
         return
 
-    print("-------------------------------------------------------------")
-    print("Enter your name to record your laptop in our compliance tracking spreadsheet:")
+    print("------------------------------------------------------")
+    print("Enter your name to register your machine:")
     while True:
         first_name = input("First Name: ").strip()
         if first_name:
             break
-        print("First name cannot be empty.")
 
     while True:
         last_name = input("Last Name: ").strip()
         if last_name:
             break
-        print("Last name cannot be empty.")
 
     row_values = [
         first_name,
@@ -1044,7 +1021,7 @@ def main():
         final.get("admin_separated", "No"),
     ]
 
-    print("\nSending results to Google Sheets...")
+    print("\nUploading results...")
     delay(0.6)
     try:
         payload = json.dumps({"row": row_values}).encode("utf-8")
@@ -1055,13 +1032,12 @@ def main():
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             if resp.status == 200:
-                print("Done! Thank you for your time, you can close this now.\n")
-                print("Made by Alden McQueen, please contact with questions :)")
+                print("Done! Recorded in tracking sheet.\n")
             else:
-                print(f"Server responded with status {resp.status}. Please notify John Pratt.")
+                print(f"HTTP error {resp.status} sending to sheet. Notify John Pratt.")
     except Exception as e:
-        print(f"Network error logging to sheet: {e}")
-        print("Your data row for manual reference:")
+        print(f"Network error: {e}")
+        print("Fallback tab-delimited row:")
         print("\t".join(row_values))
 
 
