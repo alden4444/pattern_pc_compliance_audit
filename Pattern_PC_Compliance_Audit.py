@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import ctypes
 import getpass
 import json
 import os
@@ -31,21 +32,6 @@ WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbysGXrmHrs8igDCIORukTCxJd
 _APT_NONINTERACTIVE_BASE = ["env", "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a"]
 
 
-def _supports_unicode():
-    try:
-        "✔•ℹ".encode(sys.stdout.encoding or "utf-8")
-        return True
-    except Exception:
-        return False
-
-
-USE_UNICODE = _supports_unicode()
-ICON_BULLET = "[•]" if USE_UNICODE else "[*]"
-ICON_CHECK = "✔" if USE_UNICODE else "[OK]"
-ICON_WARN = "!" if USE_UNICODE else "[WARN]"
-ICON_INFO = "ℹ" if USE_UNICODE else "[INFO]"
-
-
 def delay(seconds=0.6):
     """Pace execution visually to give users clear, readable feedback."""
     if os.environ.get("CI") == "true" or "--fast" in sys.argv:
@@ -56,22 +42,22 @@ def delay(seconds=0.6):
 
 
 def log_step(title):
-    print(f"\n{ICON_BULLET} {title}...", flush=True)
+    print(f"\n-> {title}...", flush=True)
     delay(0.6)
 
 
 def log_success(message):
-    print(f"    {ICON_CHECK} {message}", flush=True)
+    print(f"   Done: {message}", flush=True)
     delay(0.3)
 
 
 def log_warning(message):
-    print(f"    {ICON_WARN} {message}", flush=True)
+    print(f"   Note: {message}", flush=True)
     delay(0.3)
 
 
 def log_info(message):
-    print(f"    {ICON_INFO} {message}", flush=True)
+    print(f"   {message}", flush=True)
     delay(0.3)
 
 
@@ -83,7 +69,7 @@ def get_real_home():
         except KeyError:
             pass
     home_env = os.environ.get("HOME")
-    if home_env:
+    if home_env and sudo_user:
         return Path(home_env)
     return Path.home()
 
@@ -104,7 +90,6 @@ def open_url_safely(url):
         subprocess.run(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
 
-    # Linux (Arch / Ubuntu)
     if sudo_user:
         gui_env = []
         for var in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]:
@@ -220,7 +205,6 @@ def ufw_is_correctly_configured():
     if not shutil.which("ufw"):
         return False
 
-    # 1. Direct check if root or passwordless sudo
     is_root = hasattr(os, "geteuid") and os.geteuid() == 0
     cmd = ["ufw", "status", "verbose"] if is_root else ["sudo", "-n", "ufw", "status", "verbose"]
     try:
@@ -229,7 +213,6 @@ def ufw_is_correctly_configured():
     except Exception:
         pass
 
-    # 2. Safe inspection of configuration files and systemd service
     try:
         conf = Path("/etc/ufw/ufw.conf")
         if not conf.is_file() or "ENABLED=yes" not in conf.read_text():
@@ -294,7 +277,7 @@ def enforce_firewall(system):
 
         if not shutil.which("ufw"):
             log_warning("Failed to install UFW. UFW is mandatory for Cyber Essentials compliance.")
-            print("Please run manually: sudo pacman -S ufw (Arch) or sudo apt install ufw (Ubuntu)")
+            print("    Please run manually: sudo pacman -S ufw (Arch) or sudo apt install ufw (Ubuntu)")
             return False
 
         allow_ssh_before_enabling_ufw()
@@ -309,7 +292,7 @@ def enforce_firewall(system):
             return True
         else:
             log_warning("UFW installed but not reporting active status.")
-            print("Run 'sudo ufw status verbose' manually to investigate.")
+            print("    Run 'sudo ufw status verbose' manually to investigate.")
             return False
 
     elif system == "macOS":
@@ -327,7 +310,7 @@ def enforce_firewall(system):
             return True
         else:
             log_warning("Could not automatically enable macOS Firewall.")
-            print("Please enable manually: System Settings > Network > Firewall > Turn On.")
+            print("    Please enable manually: System Settings > Network > Firewall > Turn On.")
             return False
 
     elif system == "Windows":
@@ -348,7 +331,7 @@ def enforce_firewall(system):
             return True
         else:
             log_warning("Could not automatically configure Windows Firewall.")
-            print("Please enable manually in Windows Security > Firewall & network protection.")
+            print("    Please enable manually in Windows Security > Firewall & network protection.")
             return False
 
     return False
@@ -496,27 +479,39 @@ def setup_admin_separation(system):
         if dropin.exists():
             return True
 
-        print("\nCyber Essentials v3.3 requires that daily business activities are performed")
-        print("without standard access to administrative powers. On Linux, we isolate root")
-        print("elevation by requiring a distinct administrator/root password for sudo.\n")
+        print("\n    Cyber Essentials v3.3 requires that daily business activities are performed")
+        print("    without standard access to administrative powers. On Linux, we isolate root")
+        print("    elevation by requiring a distinct administrator/root password for sudo.\n")
 
         if not sys.stdin.isatty():
             log_info("Non-interactive session: skipping interactive root password setup.")
             return False
 
-        print("Please enter a new dedicated admin/root password when prompted:")
+        print("    Please enter a new dedicated admin/root password when prompted:")
         cmd = ["passwd", "root"] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "passwd", "root"]
         set_pw = subprocess.run(cmd)
         if set_pw.returncode != 0:
             log_warning("Skipped setting admin password.")
             return False
 
+        admin_rules = []
+        if grp:
+            all_system_groups = {g.gr_name for g in grp.getgrall()}
+            if "sudo" in all_system_groups:
+                admin_rules.append("%sudo ALL=(ALL:ALL) ALL")
+            if "wheel" in all_system_groups:
+                admin_rules.append("%wheel ALL=(ALL:ALL) ALL")
+        
+        if not admin_rules:
+            admin_rules = ["ALL ALL=(ALL:ALL) ALL"]
+
         rule = (
             "# Cyber Essentials Admin Separation Rule\n"
             "Defaults targetpw\n"
-            "%sudo ALL=(ALL:ALL) ALL\n"
-            "%wheel ALL=(ALL:ALL) ALL\n"
+            "Defaults timestamp_timeout=0\n"
+            + "\n".join(admin_rules) + "\n"
         )
+        
         temp_file = Path("/tmp/cyber_essentials_targetpw")
         try:
             temp_file.write_text(rule)
@@ -538,24 +533,29 @@ def setup_admin_separation(system):
             log_warning(f"Error creating sudoers dropin: {e}")
         finally:
             temp_file.unlink(missing_ok=True)
+        return False
 
     elif system == "macOS":
-        print("\nCyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
-        print("is conducted from a Standard User account, not an Administrator account.")
-        print("Action required:")
-        print("  1. Open System Settings > Users & Groups.")
-        print("  2. Click 'Add Account' and create a dedicated Administrator account.")
-        print("  3. Edit your daily account and change its type from Administrator to Standard.")
-        print("  4. Log out and log back in to your Standard account.")
+        print("\n    Cyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
+        print("    is conducted from a Standard User account, not an Administrator account.")
+        print("    Action required:")
+        print("      1. Open System Settings > Users & Groups.")
+        print("      2. Click 'Add Account' and create a dedicated Administrator account.")
+        print("      3. Edit your daily account and change its type from Administrator to Standard.")
+        print("      4. Log out and log back in to your Standard account.")
+        input("\n    Press [Enter] once your separate administrator account is configured...")
+        return True
 
     elif system == "Windows":
-        print("\nCyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
-        print("is conducted from a Standard User account, not an Administrator account.")
-        print("Action required:")
-        print("  1. Open Settings (Win + I) > Accounts > Other users.")
-        print("  2. Add a dedicated administrator account (e.g. 'admin-name') and grant it Administrator role.")
-        print("  3. Change your daily account type from Administrator to Standard User.")
-        print("  4. Sign out and sign back in to your daily Standard account.")
+        print("\n    Cyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
+        print("    is conducted from a Standard User account, not an Administrator account.")
+        print("    Action required:")
+        print("      1. Open Settings (Win + I) > Accounts > Other users.")
+        print("      2. Add a dedicated administrator account (e.g. 'admin-name') and grant it Administrator role.")
+        print("      3. Change your daily account type from Administrator to Standard User.")
+        print("      4. Sign out and sign back in to your daily Standard account.")
+        input("\n    Press [Enter] once your separate administrator account is configured...")
+        return True
 
     return False
 
@@ -604,6 +604,8 @@ def firefox_has_trafficlight(home):
             try:
                 data = json.loads(ext_json.read_text(errors="ignore"))
                 for addon in data.get("addons", []):
+                    if not addon.get("active", False):
+                        continue
                     blob = json.dumps(addon).lower()
                     if "trafficlight" in blob and "bitdefender" in blob:
                         return True
@@ -909,9 +911,9 @@ def print_summary_table(system, audit_data):
     for label, val in labels:
         status_tag = ""
         if label in ["Firewall Protection", "Website Threat Scanning", "Privilege Separation"]:
-            status_tag = f" [{ICON_CHECK}]" if val == "Yes" else f" [{ICON_WARN}]"
+            status_tag = " (Pass)" if val == "Yes" else " (Fail)"
         elif label == "Anti-Virus Protection":
-            status_tag = f" [{ICON_CHECK}]" if val not in ["None", "Unknown"] else f" [{ICON_WARN}]"
+            status_tag = " (Pass)" if val not in ["None", "Unknown"] else " (Fail)"
         print(f"{label.ljust(26)}: {val}{status_tag}")
     print("=" * 62 + "\n")
 
@@ -925,6 +927,14 @@ def main():
     args = parser.parse_args()
 
     system = get_os()
+
+    if system == "Windows":
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            print("Requesting Administrator privileges to run compliance checks...")
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+            sys.exit(0)
+
     home = get_real_home()
 
     print("=" * 62)
@@ -964,27 +974,27 @@ def main():
     if not web_ok:
         log_warning("Web threat scanning extension not detected")
         if not is_automated and not args.audit_only:
-            print("\nCyber Essentials v3.3 requires malicious website scanning (Bitdefender TrafficLight).")
-            print("Attempting to launch the extension store in your default browser...")
+            print("\n    Cyber Essentials v3.3 requires malicious website scanning (Bitdefender TrafficLight).")
+            print("    Attempting to launch the extension store in your default browser...")
             open_url_safely("https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
 
-            print("\nIf the browser window didn't open automatically, please open it manually:")
-            print("  • Chrome / Chromium / Brave / Edge:")
-            print("    https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
-            print("  • Firefox:")
-            print("    https://addons.mozilla.org/en-US/firefox/addon/trafficlight/")
-            print("\nAction required:")
-            print("  1. Click 'Add to Chrome' (or 'Add to Firefox') to install Bitdefender TrafficLight.")
-            print("  2. Click the extension icon in your browser toolbar and ensure it shows 'This page is safe' with a green checkmark.")
+            print("\n    If the browser window didn't open automatically, please open it manually:")
+            print("      • Chrome / Chromium / Brave / Edge:")
+            print("        https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
+            print("      • Firefox:")
+            print("        https://addons.mozilla.org/en-US/firefox/addon/trafficlight/")
+            print("\n    Action required:")
+            print("      1. Click 'Add to Chrome' (or 'Add to Firefox') to install Bitdefender TrafficLight.")
+            print("      2. Click the extension icon in your browser toolbar and ensure it shows 'This page is safe' with a green checkmark.")
 
-            ans = input("\nDo you already have Bitdefender TrafficLight installed and active? [y/N]: ").strip().lower()
+            ans = input("\n    Do you already have Bitdefender TrafficLight installed and active? [y/N]: ").strip().lower()
             if ans in ["y", "yes"]:
                 web_ok = True
             else:
-                input("\nPress [Enter] once the extension is installed and active in your browser...")
+                input("\n    Press [Enter] once the extension is installed and active in your browser...")
                 web_ok = detect_web_scanning(system, home)
     else:
-        log_success("Malicious web threat scanning active (TrafficLight / SmartScreen)")
+        log_success("Malicious web threat scanning active")
 
     # --- Phase 6: Software & Browser Inventory ---
     log_step("Cataloging browser applications and system patching policy")
@@ -1000,7 +1010,7 @@ def main():
     print_summary_table(system, final)
 
     if is_automated or args.audit_only:
-        print("[SUCCESS] Compliance audit checks completed.")
+        print("Compliance audit checks completed.")
         return
 
     print("-------------------------------------------------------------")
@@ -1045,7 +1055,7 @@ def main():
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             if resp.status == 200:
-                print(f"{ICON_CHECK} Done! Thank you for your time, you can close this now.\n")
+                print("Done! Thank you for your time, you can close this now.\n")
                 print("Made by Alden McQueen, please contact with questions :)")
             else:
                 print(f"Server responded with status {resp.status}. Please notify John Pratt.")
