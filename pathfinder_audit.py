@@ -68,11 +68,23 @@ def get_open_ports():
 
     return ports
 
+def get_firewall_status():
+    try:
+        raw = subprocess.check_output(["iptables", "-S", "INPUT"], text=True)
+
+        if "nixos-fw" in raw:
+            return "active"
+        return "inactive"
+
+    except Exception:
+        return "inactive"
+
 def main():
     report = {
         "identity": get_data(),
         "interfaces": get_interfaces(),
-        "open_ports": get_open_ports()
+        "open_ports": get_open_ports(),
+        "firewall": get_firewall_status()
     }
     print(json.dumps(report, indent=2))
 
