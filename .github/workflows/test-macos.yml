@@ -17,6 +17,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Run Unit Tests
+        run: python3 -m unittest -v test_compliance_audit.py
+
       - name: Run Audit
         run: |
           python3 Pattern_PC_Compliance_Audit.py

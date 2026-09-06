@@ -1,8 +1,7 @@
-#$/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Require sudo
-
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run with sudo: sudo ./setup_firewall.sh"
     exit 1
@@ -13,16 +12,18 @@ if command -v apt >/dev/null 2>&1; then
     echo "Configuring firewall for Ubuntu/Debian..."
     apt update
     apt install -y ufw
+    systemctl enable --now ufw || true
 elif command -v pacman >/dev/null 2>&1; then
-    echo "Configuring firewall for Arch"
+    echo "Configuring firewall for Arch..."
     pacman -S --noconfirm ufw
     systemctl enable --now ufw
 else
-    echo "Unsupported distro. Please intall and enable UFW manually."
+    echo "Unsupported distro. Please install and enable UFW manually."
     exit 1
 fi
 
-echo "Enabling service..."
+echo "Enabling service baseline rules..."
+ufw allow 22/tcp || true
 ufw default deny incoming
 ufw default allow outgoing
 ufw --force enable

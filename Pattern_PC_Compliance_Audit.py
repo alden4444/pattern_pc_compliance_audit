@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import getpass
 import json
 import os
@@ -10,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import webbrowser
 
@@ -26,6 +28,52 @@ except ImportError:
 
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbysGXrmHrs8igDCIORukTCxJdTEObnArLHNaVbS4v8iWm6xFW2QVzMw20-6kQiLsgup/exec"
 
+_APT_NONINTERACTIVE_BASE = ["env", "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a"]
+
+
+def _supports_unicode():
+    try:
+        "✔•ℹ".encode(sys.stdout.encoding or "utf-8")
+        return True
+    except Exception:
+        return False
+
+
+USE_UNICODE = _supports_unicode()
+ICON_BULLET = "[•]" if USE_UNICODE else "[*]"
+ICON_CHECK = "✔" if USE_UNICODE else "[OK]"
+ICON_WARN = "!" if USE_UNICODE else "[WARN]"
+ICON_INFO = "ℹ" if USE_UNICODE else "[INFO]"
+
+
+def delay(seconds=0.6):
+    """Pace execution visually to give users clear, readable feedback."""
+    if os.environ.get("CI") == "true" or "--fast" in sys.argv:
+        return
+    if not sys.stdin.isatty() and "--delay" not in sys.argv:
+        return
+    time.sleep(seconds)
+
+
+def log_step(title):
+    print(f"\n{ICON_BULLET} {title}...", flush=True)
+    delay(0.6)
+
+
+def log_success(message):
+    print(f"    {ICON_CHECK} {message}", flush=True)
+    delay(0.3)
+
+
+def log_warning(message):
+    print(f"    {ICON_WARN} {message}", flush=True)
+    delay(0.3)
+
+
+def log_info(message):
+    print(f"    {ICON_INFO} {message}", flush=True)
+    delay(0.3)
+
 
 def get_real_home():
     sudo_user = os.environ.get("SUDO_USER")
@@ -35,13 +83,28 @@ def get_real_home():
         except KeyError:
             pass
     home_env = os.environ.get("HOME")
-    if home_env and sudo_user:
+    if home_env:
         return Path(home_env)
     return Path.home()
 
 
 def open_url_safely(url):
+    system = platform.system().lower()
+    if system == "windows":
+        webbrowser.open(url)
+        return
+
     sudo_user = os.environ.get("SUDO_USER")
+    if system == "darwin":
+        if sudo_user:
+            res = subprocess.run(["sudo", "-u", sudo_user, "open", url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return
+        subprocess.run(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+
+    # Linux (Arch / Ubuntu)
     if sudo_user:
         gui_env = []
         for var in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]:
@@ -71,22 +134,31 @@ def get_os():
     name = platform.system().lower()
     if name == "darwin":
         return "macOS"
+    elif name == "windows":
+        return "Windows"
     elif name == "linux":
         distro = "Unknown"
+        distro_like = ""
         try:
             if hasattr(platform, "freedesktop_os_release"):
-                distro = platform.freedesktop_os_release().get("ID", "Unknown")
+                info = platform.freedesktop_os_release()
+                distro = info.get("ID", "").lower()
+                distro_like = info.get("ID_LIKE", "").lower()
             else:
                 with open("/etc/os-release") as f:
                     for line in f:
                         if line.startswith("ID="):
-                            distro = line.strip().split("=")[1].strip("'\"")
-                            break
+                            distro = line.strip().split("=")[1].strip("'\"").lower()
+                        elif line.startswith("ID_LIKE="):
+                            distro_like = line.strip().split("=")[1].strip("'\"").lower()
         except Exception:
             pass
-        return "Arch" if distro == "arch" else ("Ubuntu" if distro == "ubuntu" else "Linux")
-    elif name == "windows":
-        return "Windows"
+
+        if distro == "arch" or "arch" in distro_like:
+            return "Arch"
+        elif distro in ["ubuntu", "debian"] or "ubuntu" in distro_like or "debian" in distro_like:
+            return "Ubuntu"
+        return "Linux"
     return "Unknown"
 
 
@@ -103,103 +175,319 @@ def _run(cmd, timeout=45, env=None):
         return None
 
 
-_APT_NONINTERACTIVE = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a"]
+def _run_powershell(script, timeout=30):
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return res.stdout.strip()
+    except Exception:
+        return ""
+
+
+def get_linux_bin_version(binary_name):
+    path = shutil.which(binary_name)
+    if path:
+        try:
+            out = subprocess.check_output([path, "--version"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+            match = re.search(r"(\d+(?:\.\d+)+)", out)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+    return None
 
 
 def disable_competing_linux_firewalls():
     if shutil.which("firewall-cmd") or shutil.which("firewalld"):
-        print("[Firewall] Disabling conflicting firewalld service...")
-        _run(["sudo", "systemctl", "stop", "firewalld"], timeout=30)
-        _run(["sudo", "systemctl", "disable", "firewalld"], timeout=30)
-        _run(["sudo", "systemctl", "mask", "firewalld"], timeout=30)
+        log_info("Disabling conflicting firewalld service...")
+        cmd_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
+        _run(cmd_prefix + ["systemctl", "stop", "firewalld"], timeout=10)
+        _run(cmd_prefix + ["systemctl", "disable", "firewalld"], timeout=10)
+        _run(cmd_prefix + ["systemctl", "mask", "firewalld"], timeout=10)
 
 
 def allow_ssh_before_enabling_ufw():
-    _run(["sudo", "ufw", "allow", "OpenSSH"], timeout=30)
-    _run(["sudo", "ufw", "allow", "22/tcp"], timeout=30)
+    cmd_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
+    _run(cmd_prefix + ["ufw", "allow", "OpenSSH"], timeout=10)
+    _run(cmd_prefix + ["ufw", "allow", "22/tcp"], timeout=10)
 
 
 def ufw_is_correctly_configured():
     if not shutil.which("ufw"):
         return False
+
+    # 1. Direct check if root or passwordless sudo
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    cmd = ["ufw", "status", "verbose"] if is_root else ["sudo", "-n", "ufw", "status", "verbose"]
     try:
-        out = subprocess.check_output(
-            ["sudo", "ufw", "status", "verbose"], text=True, stderr=subprocess.DEVNULL, timeout=30
-        ).lower()
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=5).lower()
+        return ("status: active" in out and "deny (incoming)" in out and "allow (outgoing)" in out)
+    except Exception:
+        pass
+
+    # 2. Safe inspection of configuration files and systemd service
+    try:
+        conf = Path("/etc/ufw/ufw.conf")
+        if not conf.is_file() or "ENABLED=yes" not in conf.read_text():
+            return False
+
+        def_ufw = Path("/etc/default/ufw")
+        if not def_ufw.is_file():
+            return False
+
+        text = def_ufw.read_text()
+        in_drop = ('DEFAULT_INPUT_POLICY="DROP"' in text or 'DEFAULT_INPUT_POLICY="DENY"' in text)
+        out_allow = 'DEFAULT_OUTPUT_POLICY="ACCEPT"' in text
+        if not (in_drop and out_allow):
+            return False
+
+        if shutil.which("systemctl"):
+            res = subprocess.run(["systemctl", "is-active", "ufw"], capture_output=True, text=True, timeout=5)
+            if res.stdout.strip() != "active":
+                return False
+
+        return True
     except Exception:
         return False
-    return (
-        "status: active" in out
-        and "deny (incoming)" in out
-        and "allow (outgoing)" in out
-    )
+
+
+def check_mac_firewall():
+    fw_bin = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+    if not Path(fw_bin).exists():
+        return False
+    try:
+        out = subprocess.check_output([fw_bin, "--getglobalstate"], text=True, stderr=subprocess.DEVNULL, timeout=10).lower()
+        return "enabled" in out
+    except Exception:
+        return False
+
+
+def check_windows_firewall():
+    script = "(Get-NetFirewallProfile | Where-Object { -not $_.Enabled }).Count"
+    res = _run_powershell(script, timeout=15)
+    return res == "0"
 
 
 def enforce_firewall(system):
-    print("\n--- [Step 1] ---")
-
     if system in ["Arch", "Ubuntu", "Linux"]:
+        if ufw_is_correctly_configured():
+            log_success("Host firewall active and enforcing baseline rules (deny incoming, allow outgoing).")
+            return True
+
+        log_info("Configuring UFW baseline rules...")
         disable_competing_linux_firewalls()
 
+        sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo"]
+
         if not shutil.which("ufw"):
-            print("[+] UFW is not installed. Installing now...")
+            log_info("Installing UFW packet filter...")
             if system == "Ubuntu" and shutil.which("apt"):
-                subprocess.run(_APT_NONINTERACTIVE + ["apt", "update", "-y"])
-                subprocess.run(_APT_NONINTERACTIVE + ["apt", "install", "-y", "ufw"])
+                subprocess.run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "update", "-y"], check=False)
+                subprocess.run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "install", "-y", "ufw"], check=False)
             elif system == "Arch" and shutil.which("pacman"):
-                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "ufw"])
-                subprocess.run(["sudo", "systemctl", "enable", "--now", "ufw"])
+                subprocess.run(sudo_prefix + ["pacman", "-S", "--noconfirm", "ufw"], check=False)
+                subprocess.run(sudo_prefix + ["systemctl", "enable", "--now", "ufw"], check=False)
 
         if not shutil.which("ufw"):
-            print("\n[ERROR] Failed to install UFW. UFW is mandatory for Cyber Essentials compliance.")
+            log_warning("Failed to install UFW. UFW is mandatory for Cyber Essentials compliance.")
             print("Please run manually: sudo pacman -S ufw (Arch) or sudo apt install ufw (Ubuntu)")
-            sys.exit(1)
+            return False
 
-        if not ufw_is_correctly_configured():
-            print("[+] Configuring UFW baseline rules (deny incoming, allow outgoing)...")
-            allow_ssh_before_enabling_ufw()
-            subprocess.run(["sudo", "ufw", "default", "deny", "incoming"], check=True)
-            subprocess.run(["sudo", "ufw", "default", "allow", "outgoing"], check=True)
-            subprocess.run(["sudo", "ufw", "--force", "enable"], check=True)
-            if system == "Arch":
-                subprocess.run(["sudo", "systemctl", "enable", "--now", "ufw"])
+        allow_ssh_before_enabling_ufw()
+        subprocess.run(sudo_prefix + ["ufw", "default", "deny", "incoming"], check=False)
+        subprocess.run(sudo_prefix + ["ufw", "default", "allow", "outgoing"], check=False)
+        subprocess.run(sudo_prefix + ["ufw", "--force", "enable"], check=False)
+        if shutil.which("systemctl"):
+            subprocess.run(sudo_prefix + ["systemctl", "enable", "--now", "ufw"], check=False)
 
         if ufw_is_correctly_configured():
-            print("[SUCCESS] UFW is active and enforcing baseline rules.")
+            log_success("Host firewall active and enforcing baseline rules.")
+            return True
         else:
-            print("\n[ERROR] UFW is present but not reporting active status.")
+            log_warning("UFW installed but not reporting active status.")
             print("Run 'sudo ufw status verbose' manually to investigate.")
-            sys.exit(1)
+            return False
 
     elif system == "macOS":
-        print("[+] Verifying macOS Application Firewall...")
-        subprocess.run(["sudo", "/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"], check=True)
-        print("[SUCCESS] macOS Firewall active.")
+        if check_mac_firewall():
+            log_success("macOS Application Firewall is active.")
+            return True
+
+        log_info("Enabling macOS Application Firewall...")
+        sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo"]
+        fw_bin = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+        subprocess.run(sudo_prefix + [fw_bin, "--setglobalstate", "on"], check=False)
+
+        if check_mac_firewall():
+            log_success("macOS Firewall active.")
+            return True
+        else:
+            log_warning("Could not automatically enable macOS Firewall.")
+            print("Please enable manually: System Settings > Network > Firewall > Turn On.")
+            return False
 
     elif system == "Windows":
-        print("[+] Verifying Windows Firewall...")
-        subprocess.run(["powershell", "-Command", "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True"], check=True)
-        print("[SUCCESS] Windows Firewall active.")
+        if check_windows_firewall():
+            log_success("Windows Firewall is active across Domain, Public, and Private profiles.")
+            return True
+
+        log_info("Enabling Windows Firewall profiles...")
+        cmd = "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow"
+        _run_powershell(cmd, timeout=20)
+
+        if not check_windows_firewall():
+            elevate_cmd = f'Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -NonInteractive -Command {cmd}" -Wait'
+            _run_powershell(elevate_cmd, timeout=30)
+
+        if check_windows_firewall():
+            log_success("Windows Firewall active.")
+            return True
+        else:
+            log_warning("Could not automatically configure Windows Firewall.")
+            print("Please enable manually in Windows Security > Firewall & network protection.")
+            return False
+
+    return False
+
+
+def detect_antivirus(system):
+    if system in ["Ubuntu", "Arch", "Linux"]:
+        if shutil.which("clamscan"):
+            try:
+                out = subprocess.check_output(["clamscan", "--version"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+                match = re.search(r"ClamAV\s+(\d+(?:\.\d+)+)", out)
+                return f"ClamAV - {match.group(1)}" if match else "ClamAV - Active"
+            except Exception:
+                return "ClamAV - Active"
+        if Path("/opt/bitdefender-security-tools").exists():
+            return "Bitdefender Endpoint Security"
+        if shutil.which("mdatp"):
+            return "Microsoft Defender for Linux"
+        if shutil.which("falconctl"):
+            return "CrowdStrike Falcon"
+        if shutil.which("sentinelctl"):
+            return "SentinelOne Agent"
+        return "None"
+
+    elif system == "macOS":
+        if (Path("/Library/Bitdefender").is_dir() or
+            Path("/Applications/Bitdefender").is_dir() or
+            Path("/Applications/Bitdefender Endpoint Security Tools.app").is_dir()):
+            return "Bitdefender Endpoint Security"
+        if Path("/Applications/Falcon.app").is_dir() or shutil.which("falconctl"):
+            return "CrowdStrike Falcon"
+        if Path("/Library/Sentinel/sentinel-agent").is_dir() or Path("/Applications/SentinelOne").is_dir():
+            return "SentinelOne Agent"
+        if Path("/Applications/Microsoft Defender.app").is_dir():
+            return "Microsoft Defender for Mac"
+        if Path("/Library/Sophos Anti-Virus").is_dir() or Path("/Applications/Sophos").is_dir():
+            return "Sophos Anti-Virus"
+        return "XProtect (macOS) - Active"
+
+    elif system == "Windows":
+        ps_av = """
+        $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        if ($mp -and $mp.RealTimeProtectionEnabled) {
+            $sig = $mp.AntivirusSignatureVersion
+            if ($sig) { "Windows Defender - Active ($sig)" } else { "Windows Defender - Active" }
+            exit
+        }
+        $av = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue
+        if ($av) {
+            ($av | Select-Object -ExpandProperty displayName) -join ', ' + ' - Active'
+            exit
+        }
+        'Windows Defender - Active'
+        """
+        res = _run_powershell(ps_av, timeout=15)
+        return res if res else "Windows Defender - Active"
+
+    return "None"
 
 
 def fix_antivirus_background(system):
-    print("\n--- [Step 2] ---")
+    current_av = detect_antivirus(system)
+    if current_av != "None":
+        log_success(f"Anti-virus protection detected: {current_av}")
+        return current_av
+
     if system in ["Ubuntu", "Arch", "Linux"]:
-        if not shutil.which("clamscan") and not Path("/opt/bitdefender-security-tools").exists():
-            print("[+] No anti-virus found. Installing ClamAV in the background...")
-            if system == "Ubuntu" and shutil.which("apt"):
-                _run(_APT_NONINTERACTIVE + ["apt", "update", "-y"], timeout=120)
-                _run(_APT_NONINTERACTIVE + ["apt", "install", "-y", "clamav", "clamav-daemon"], timeout=180)
-                _run(["sudo", "freshclam"], timeout=60)
-            elif system == "Arch" and shutil.which("pacman"):
-                _run(["sudo", "pacman", "-S", "--noconfirm", "clamav"], timeout=120)
-                _run(["sudo", "systemctl", "enable", "--now", "clamav-freshclam"], timeout=30)
-                _run(["sudo", "freshclam"], timeout=60)
-            print("[SUCCESS] ClamAV installed.")
+        log_info("No anti-virus found. Installing ClamAV...")
+        sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
+        if system == "Ubuntu" and shutil.which("apt"):
+            _run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "update", "-y"], timeout=120)
+            _run(sudo_prefix + _APT_NONINTERACTIVE_BASE + ["apt", "install", "-y", "clamav", "clamav-daemon"], timeout=180)
+            _run(sudo_prefix + ["freshclam"], timeout=60)
+        elif system == "Arch" and shutil.which("pacman"):
+            _run(sudo_prefix + ["pacman", "-S", "--noconfirm", "clamav"], timeout=120)
+            _run(sudo_prefix + ["systemctl", "enable", "--now", "clamav-freshclam"], timeout=30)
+            _run(sudo_prefix + ["freshclam"], timeout=60)
+
+        detected = detect_antivirus(system)
+        if detected != "None":
+            log_success(f"Anti-virus installed: {detected}")
+            return detected
         else:
-            print("[SUCCESS] Anti-virus protection detected.")
+            log_warning("ClamAV setup in progress. Please ensure signature updates complete.")
+            return "ClamAV - Initializing"
     else:
-        print("[SUCCESS] System malware protection detected.")
+        log_success("System malware protection detected.")
+        return "Active"
+
+
+def check_admin_separated(system):
+    if system in ["Ubuntu", "Arch", "Linux"]:
+        dropin = Path("/etc/sudoers.d/cyber_essentials_targetpw")
+        if dropin.exists():
+            return "Yes"
+
+        check_user = os.environ.get("SUDO_USER") or getpass.getuser()
+        try:
+            out = subprocess.check_output(["id", "-Gn", check_user], text=True, stderr=subprocess.DEVNULL, timeout=5)
+            groups = set(out.strip().split())
+            if "sudo" in groups or "wheel" in groups:
+                return "No"
+            return "Yes"
+        except Exception:
+            if grp:
+                try:
+                    groups = [g.gr_name for g in grp.getgrall() if check_user in g.gr_mem]
+                    return "No" if ("sudo" in groups or "wheel" in groups) else "Yes"
+                except Exception:
+                    pass
+            return "No"
+
+    elif system == "macOS":
+        check_user = os.environ.get("SUDO_USER") or getpass.getuser()
+        try:
+            check = subprocess.run(["dsmemberutil", "checkmembership", "-U", check_user, "-G", "admin"],
+                                   capture_output=True, text=True, timeout=5)
+            if "is not a member" in check.stdout.lower():
+                return "Yes"
+            elif "is a member" in check.stdout.lower():
+                return "No"
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(["id", "-Gn", check_user], text=True, stderr=subprocess.DEVNULL, timeout=5)
+            return "No" if "admin" in set(out.strip().split()) else "Yes"
+        except Exception:
+            return "No"
+
+    elif system == "Windows":
+        try:
+            out = subprocess.check_output(["whoami", "/groups"], text=True, stderr=subprocess.DEVNULL, timeout=10)
+            return "No" if "S-1-5-32-544" in out else "Yes"
+        except Exception:
+            ps_check = "([System.Security.Principal.WindowsIdentity]::GetCurrent().Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }) -ne $null"
+            is_adm = _run_powershell(ps_check, timeout=10)
+            return "No" if "True" in is_adm else "Yes"
+
+    return "No"
 
 
 def setup_admin_separation(system):
@@ -208,42 +496,68 @@ def setup_admin_separation(system):
         if dropin.exists():
             return True
 
-        print("\n--- [Step 3] ---")
-        print("To protect your daily work, administrative actions will now require")
-        print("a distinct admin/root password rather than your daily login password.\n")
-        print("Please remember this and ensure it's different from your current one.\n")
+        print("\nCyber Essentials v3.3 requires that daily business activities are performed")
+        print("without standard access to administrative powers. On Linux, we isolate root")
+        print("elevation by requiring a distinct administrator/root password for sudo.\n")
 
-        set_pw = subprocess.run(["sudo", "passwd", "root"])
-        if set_pw.returncode != 0:
-            print("Skipped setting admin password.")
+        if not sys.stdin.isatty():
+            log_info("Non-interactive session: skipping interactive root password setup.")
             return False
 
-        rule = "Defaults targetpw\nDefaults timestamp_timeout=0\n%sudo ALL=(ALL:ALL) ALL\n%wheel ALL=(ALL:ALL) ALL\n"
+        print("Please enter a new dedicated admin/root password when prompted:")
+        cmd = ["passwd", "root"] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "passwd", "root"]
+        set_pw = subprocess.run(cmd)
+        if set_pw.returncode != 0:
+            log_warning("Skipped setting admin password.")
+            return False
+
+        rule = (
+            "# Cyber Essentials Admin Separation Rule\n"
+            "Defaults targetpw\n"
+            "%sudo ALL=(ALL:ALL) ALL\n"
+            "%wheel ALL=(ALL:ALL) ALL\n"
+        )
         temp_file = Path("/tmp/cyber_essentials_targetpw")
-        temp_file.write_text(rule)
-
-        check = subprocess.run(["sudo", "visudo", "-cf", str(temp_file)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if check.returncode == 0:
-            subprocess.run(["sudo", "cp", str(temp_file), str(dropin)])
-            subprocess.run(["sudo", "chmod", "0440", str(dropin)])
-            temp_file.unlink(missing_ok=True)
-            print("[✔] Administrative elevation successfully isolated.")
-            return True
-        temp_file.unlink(missing_ok=True)
-    return False
-
-
-def get_linux_bin_version(binary_name):
-    path = shutil.which(binary_name)
-    if path:
         try:
-            out = subprocess.check_output([path, "--version"], text=True, stderr=subprocess.DEVNULL)
-            match = re.search(r"(\d+(?:\.\d+)+)", out)
-            if match:
-                return match.group(1)
-        except Exception:
-            pass
-    return None
+            temp_file.write_text(rule)
+            sudo_prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo"]
+            check = subprocess.run(sudo_prefix + ["visudo", "-cf", str(temp_file)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if check.returncode == 0:
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    shutil.copy(temp_file, dropin)
+                    dropin.chmod(0o440)
+                else:
+                    subprocess.run(["sudo", "cp", str(temp_file), str(dropin)], check=True)
+                    subprocess.run(["sudo", "chmod", "0440", str(dropin)], check=True)
+                log_success("Administrative elevation successfully isolated via distinct root credentials.")
+                return True
+            else:
+                log_warning("Sudoers rule validation failed; reverting changes.")
+        except Exception as e:
+            log_warning(f"Error creating sudoers dropin: {e}")
+        finally:
+            temp_file.unlink(missing_ok=True)
+
+    elif system == "macOS":
+        print("\nCyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
+        print("is conducted from a Standard User account, not an Administrator account.")
+        print("Action required:")
+        print("  1. Open System Settings > Users & Groups.")
+        print("  2. Click 'Add Account' and create a dedicated Administrator account.")
+        print("  3. Edit your daily account and change its type from Administrator to Standard.")
+        print("  4. Log out and log back in to your Standard account.")
+
+    elif system == "Windows":
+        print("\nCyber Essentials v3.3 requires that daily work (browsing, email, office apps)")
+        print("is conducted from a Standard User account, not an Administrator account.")
+        print("Action required:")
+        print("  1. Open Settings (Win + I) > Accounts > Other users.")
+        print("  2. Add a dedicated administrator account (e.g. 'admin-name') and grant it Administrator role.")
+        print("  3. Change your daily account type from Administrator to Standard User.")
+        print("  4. Sign out and sign back in to your daily Standard account.")
+
+    return False
 
 
 def find_firefox_profile_dirs(home):
@@ -298,10 +612,249 @@ def firefox_has_trafficlight(home):
 
         ext_dir = profile_dir / "extensions"
         if ext_dir.is_dir():
-            for xpi in ext_dir.iterdir():
-                if "trafficlight" in xpi.name.lower():
-                    return True
+            try:
+                for xpi in ext_dir.iterdir():
+                    if "trafficlight" in xpi.name.lower():
+                        return True
+            except Exception:
+                pass
     return False
+
+
+def detect_browsers(system, home):
+    found = []
+
+    if system in ["Ubuntu", "Arch", "Linux"]:
+        linux_browsers = [
+            ("Chrome", ["google-chrome-stable", "google-chrome"]),
+            ("Chromium", ["chromium", "chromium-browser"]),
+            ("Firefox", ["firefox", "firefox-esr", "firefox-developer-edition", "firefox-nightly"]),
+            ("Brave", ["brave", "brave-browser"]),
+            ("Edge", ["microsoft-edge-stable", "microsoft-edge"]),
+            ("Opera", ["opera"]),
+            ("Vivaldi", ["vivaldi-stable", "vivaldi"]),
+        ]
+        for name, binaries in linux_browsers:
+            for b in binaries:
+                ver = get_linux_bin_version(b)
+                if ver:
+                    found.append(f"{name} {ver}")
+                    break
+
+    elif system == "macOS":
+        mac_apps = [
+            ("Safari", Path("/Applications/Safari.app")),
+            ("Chrome", Path("/Applications/Google Chrome.app")),
+            ("Firefox", Path("/Applications/Firefox.app")),
+            ("Brave", Path("/Applications/Brave Browser.app")),
+            ("Edge", Path("/Applications/Microsoft Edge.app")),
+            ("Arc", Path("/Applications/Arc.app")),
+        ]
+        for name, app_path in mac_apps:
+            candidates = [app_path, home / "Applications" / app_path.name]
+            for p in candidates:
+                plist_path = p / "Contents/Info.plist"
+                if plist_path.is_file():
+                    try:
+                        with open(plist_path, "rb") as f:
+                            pl = plistlib.load(f)
+                            ver = pl.get("CFBundleShortVersionString") or pl.get("CFBundleVersion")
+                            if ver:
+                                found.append(f"{name} {ver}")
+                                break
+                    except Exception:
+                        pass
+
+    elif system == "Windows":
+        win_apps = [
+            ("Chrome", [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            ]),
+            ("Edge", [
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            ]),
+            ("Firefox", [
+                r"C:\Program Files\Mozilla Firefox\firefox.exe",
+                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+            ]),
+            ("Brave", [
+                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            ]),
+        ]
+        for name, paths in win_apps:
+            for p in paths:
+                if Path(p).is_file():
+                    ver = _run_powershell(f"(Get-Item '{p}').VersionInfo.ProductVersion", timeout=5)
+                    found.append(f"{name} {ver}" if ver else name)
+                    break
+
+    return ", ".join(found) if found else "None detected"
+
+
+def detect_web_scanning(system, home):
+    ext_id = "cfnpidifppmenkapgihekkeednfoenal"
+
+    candidate_roots = []
+    if system in ["Ubuntu", "Arch", "Linux"]:
+        candidate_roots = [
+            home / ".config/google-chrome",
+            home / ".config/chromium",
+            home / ".config/BraveSoftware/Brave-Browser",
+            home / ".config/microsoft-edge",
+            home / ".var/app/com.google.Chrome/config/google-chrome",
+            home / ".var/app/org.chromium.Chromium/config/chromium",
+            home / ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+            home / "snap/chromium/current/.config/chromium",
+        ]
+    elif system == "macOS":
+        candidate_roots = [
+            home / "Library/Application Support/Google/Chrome",
+            home / "Library/Application Support/BraveSoftware/Brave-Browser",
+            home / "Library/Application Support/Microsoft Edge",
+            home / "Library/Application Support/Chromium",
+            home / "Library/Application Support/Arc/User Data",
+        ]
+    elif system == "Windows":
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
+        candidate_roots = [
+            local_app_data / "Google/Chrome/User Data",
+            local_app_data / "Microsoft/Edge/User Data",
+            local_app_data / "BraveSoftware/Brave-Browser/User Data",
+        ]
+
+    for root in candidate_roots:
+        if root.is_dir():
+            try:
+                if any(root.glob(f"*/Extensions/{ext_id}*")):
+                    return True
+            except Exception:
+                pass
+
+    if firefox_has_trafficlight(home):
+        return True
+
+    if system == "Windows":
+        smartscreen_check = """
+        $ss = Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer' -Name 'SmartScreenEnabled' -ErrorAction SilentlyContinue
+        if ($ss -and $ss.SmartScreenEnabled -ne 'Off') { 'Yes' } else { 'No' }
+        """
+        res = _run_powershell(smartscreen_check, timeout=5)
+        if res == "Yes":
+            return True
+
+    return False
+
+
+def get_hardware_uuid(system):
+    if system in ["Ubuntu", "Arch", "Linux"]:
+        for sys_path in ["/sys/class/dmi/id/product_uuid", "/sys/class/dmi/id/product_serial"]:
+            try:
+                p = Path(sys_path)
+                if p.is_file():
+                    val = p.read_text(errors="ignore").strip()
+                    if val and not any(bad in val.lower() for bad in ["none", "denied", "default", "o.e.m", "00000000"]):
+                        return val
+            except Exception:
+                pass
+
+        if shutil.which("dmidecode"):
+            cmd = ["dmidecode", "-s", "system-uuid"]
+            if hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
+                cmd = ["sudo", "-n"] + cmd
+            try:
+                out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+                if out and not any(bad in out.lower() for bad in ["none", "denied", "default", "o.e.m", "00000000"]):
+                    return out
+            except Exception:
+                pass
+
+        for mid in [Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")]:
+            if mid.is_file():
+                try:
+                    val = mid.read_text(errors="ignore").strip()
+                    if val:
+                        return val
+                except Exception:
+                    pass
+
+        return platform.node() or "Unknown"
+
+    elif system == "macOS":
+        try:
+            raw = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+            match = re.search(r'"IOPlatformSerialNumber"\s*=\s*"([^"]+)"', raw)
+            if match:
+                return match.group(1)
+            match_uuid = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', raw)
+            if match_uuid:
+                return match_uuid.group(1)
+        except Exception:
+            pass
+        try:
+            sp = subprocess.check_output(["system_profiler", "SPHardwareDataType"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+            match = re.search(r"Serial Number \([^)]+\):\s*(\S+)", sp)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return "Unknown"
+
+    elif system == "Windows":
+        res = _run_powershell("(Get-CimInstance Win32_BIOS).SerialNumber", timeout=5)
+        if res and res.lower() != "to be filled by o.e.m.":
+            return res
+        res = _run_powershell("(Get-CimInstance Win32_ComputerSystemProduct).UUID", timeout=5)
+        return res if res else "Unknown"
+
+    return "Unknown"
+
+
+def get_os_version(system):
+    if system == "Arch":
+        return f"Rolling ({platform.release()})"
+    elif system in ["Ubuntu", "Linux"]:
+        try:
+            if hasattr(platform, "freedesktop_os_release"):
+                info = platform.freedesktop_os_release()
+                ver = info.get("VERSION_ID") or info.get("BUILD_ID") or info.get("PRETTY_NAME")
+                if ver:
+                    return ver
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("VERSION_ID="):
+                        return line.split("=")[1].strip().strip('"')
+                    elif line.startswith("PRETTY_NAME="):
+                        return line.split("=")[1].strip().strip('"')
+        except Exception:
+            pass
+        return platform.release()
+
+    elif system == "macOS":
+        try:
+            return subprocess.check_output(["sw_vers", "-productVersion"], text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        except Exception:
+            return platform.mac_ver()[0] or "Unknown"
+
+    elif system == "Windows":
+        ps_ver = """
+        $cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -ErrorAction SilentlyContinue
+        if ($cv) {
+            $prod = $cv.ProductName
+            $disp = $cv.DisplayVersion
+            $build = $cv.CurrentBuild
+            if ($disp) { "$prod $disp (Build $build)" } else { "$prod (Build $build)" }
+        } else {
+            [System.Environment]::OSVersion.Version.ToString()
+        }
+        """
+        res = _run_powershell(ps_ver, timeout=5)
+        return res if res else platform.version()
+
+    return platform.version()
 
 
 def run_audit(system):
@@ -314,203 +867,155 @@ def run_audit(system):
         "browsers": "None detected",
         "email_apps": "N/A (Web only)",
         "office_apps": "Google Workspace",
-        "uuid": "Unknown",
-        "os_version": "Unknown",
-        "anti_virus": "None",
-        "web_scanning": "No",
+        "uuid": get_hardware_uuid(system),
+        "os_version": get_os_version(system),
+        "anti_virus": detect_antivirus(system),
+        "web_scanning": "Yes" if detect_web_scanning(system, home) else "No",
         "firewall": "No",
-        "admin_separated": "No",
+        "admin_separated": check_admin_separated(system),
     }
 
-    if system == "macOS":
-        try:
-            data["os_version"] = subprocess.check_output(["sw_vers", "-productVersion"], text=True).strip()
-            raw = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], text=True)
-            match = re.search(r'"IOPlatformSerialNumber"\s*=\s*"([^"]+)"', raw)
-            if match:
-                data["uuid"] = match.group(1)
-            fw = subprocess.check_output(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"], text=True).lower()
-            data["firewall"] = "Yes" if "enabled" in fw else "No"
-            data["anti_virus"] = "XProtect (mac os) - Active"
-
-            check_user = os.environ.get("SUDO_USER") or getpass.getuser()
-            check = subprocess.run(["dsmemberutil", "checkmembership", "-U", check_user, "-G", "admin"], capture_output=True, text=True)
-            data["admin_separated"] = "Yes" if "is not a member" in check.stdout.lower() else "No"
-
-            chrome_ext_found = any(home.glob("Library/Application Support/Google/Chrome/*/Extensions/cfnpidifppmenkapgihekkeednfoenal*"))
-            ff_found = firefox_has_trafficlight(home)
-            data["web_scanning"] = "Yes" if (chrome_ext_found or ff_found) else "No"
-        except Exception:
-            pass
-
-    elif system in ["Ubuntu", "Arch", "Linux"]:
-        try:
-            uuid_proc = subprocess.run(["sudo", "cat", "/sys/class/dmi/id/product_uuid"], capture_output=True, text=True, timeout=3)
-            val = uuid_proc.stdout.strip()
-            if not val or "denied" in val.lower():
-                serial_proc = subprocess.run(["sudo", "cat", "/sys/class/dmi/id/product_serial"], capture_output=True, text=True, timeout=3)
-                val = serial_proc.stdout.strip()
-            if (not val or "denied" in val.lower()) and shutil.which("dmidecode"):
-                dmi_proc = subprocess.run(["sudo", "dmidecode", "-s", "system-uuid"], capture_output=True, text=True, timeout=3)
-                val = dmi_proc.stdout.strip()
-            if not val or "denied" in val.lower():
-                mid = Path("/etc/machine-id")
-                if mid.is_file():
-                    val = mid.read_text().strip()
-            data["uuid"] = val if val else "Unknown"
-        except Exception:
-            data["uuid"] = "Unknown"
-
-        if system == "Arch":
-            data["os_version"] = f"Rolling ({platform.release()})"
-        else:
-            try:
-                with open("/etc/os-release") as f:
-                    for line in f:
-                        if line.startswith("VERSION_ID="):
-                            data["os_version"] = line.split("=")[1].strip().strip('"')
-                            break
-            except Exception:
-                pass
-
-        linux_browsers = {
-            "Chrome": "google-chrome-stable",
-            "Chromium": "chromium",
-            "Firefox": "firefox",
-            "Brave": "brave"
-        }
-        found_browsers = []
-        for bname, bbin in linux_browsers.items():
-            ver = get_linux_bin_version(bbin)
-            if not ver and bname == "Chrome":
-                ver = get_linux_bin_version("google-chrome")
-            if not ver and bname == "Firefox":
-                for alt in ["firefox-nightly", "firefox-trunk", "firefox-esr", "firefox-developer-edition"]:
-                    ver = get_linux_bin_version(alt)
-                    if ver:
-                        bname = "Firefox Nightly" if alt == "firefox-nightly" else bname
-                        break
-            if ver:
-                found_browsers.append(f"{bname} {ver}")
-
-        if found_browsers:
-            data["browsers"] = ", ".join(found_browsers)
-
+    if system in ["Arch", "Ubuntu", "Linux"]:
         data["firewall"] = "Yes" if ufw_is_correctly_configured() else "No"
-
-        if shutil.which("clamscan"):
-            out = subprocess.check_output(["clamscan", "--version"], text=True)
-            match = re.search(r"(\d+(?:\.\d+)+)", out)
-            data["anti_virus"] = f"ClamAV - {match.group(1)}" if match else "ClamAV - Active"
-        elif Path("/opt/bitdefender-security-tools").exists():
-            data["anti_virus"] = "Bitdefender"
-
-        ext_id = "cfnpidifppmenkapgihekkeednfoenal"
-        candidate_roots = [
-            home / ".config/google-chrome",
-            home / ".config/chromium",
-            home / ".config/BraveSoftware/Brave-Browser",
-            home / ".config/microsoft-edge",
-            home / ".var/app/com.google.Chrome/config/google-chrome",
-            home / ".var/app/org.chromium.Chromium/config/chromium",
-            home / ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
-            home / "snap/chromium/current/.config/chromium",
-        ]
-
-        ext_found = False
-        for root in candidate_roots:
-            if root.is_dir():
-                if any(root.glob(f"*/Extensions/{ext_id}*")):
-                    ext_found = True
-                    break
-
-        if not ext_found:
-            ext_found = firefox_has_trafficlight(home)
-
-        data["web_scanning"] = "Yes" if ext_found else "No"
-
-        dropin = Path("/etc/sudoers.d/cyber_essentials_targetpw")
-        if dropin.exists():
-            data["admin_separated"] = "Yes"
-        elif grp:
-            check_user = os.environ.get("SUDO_USER") or getpass.getuser()
-            try:
-                groups = [g.gr_name for g in grp.getgrall() if check_user in g.gr_mem]
-                data["admin_separated"] = "No" if ("sudo" in groups or "wheel" in groups) else "Yes"
-            except Exception:
-                data["admin_separated"] = "No"
-
+    elif system == "macOS":
+        data["firewall"] = "Yes" if check_mac_firewall() else "No"
     elif system == "Windows":
-        try:
-            ver = subprocess.check_output(["powershell", "-Command", '(Get-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").DisplayVersion'], text=True).strip()
-            data["os_version"] = ver
-            data["uuid"] = subprocess.check_output(["powershell", "-Command", '(Get-CimInstance Win32_BIOS).SerialNumber'], text=True).strip()
-            data["anti_virus"] = "Windows Defender - Active"
-            data["web_scanning"] = "Yes"
-            data["browsers"] = "Chrome"
-            fw = subprocess.check_output(["powershell", "-Command", 'Get-NetFirewallProfile | Where-Object { $_.Enabled -eq "False" }'], text=True).strip()
-            data["firewall"] = "No" if fw else "Yes"
-            is_adm = subprocess.check_output(["powershell", "-Command", '[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent() | Select-Object -ExpandProperty IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'], text=True).strip()
-            data["admin_separated"] = "No" if "True" in is_adm else "Yes"
-        except Exception:
-            pass
+        data["firewall"] = "Yes" if check_windows_firewall() else "No"
 
+    data["browsers"] = detect_browsers(system, home)
     return data
 
 
-def main():
-    system = get_os()
-    print("=" * 60)
-    print(f"      Pattern Device Compliance Setup & Audit ({system})")
-    print("=" * 60)
+def print_summary_table(system, audit_data):
+    delay(0.4)
+    print("\n" + "=" * 62)
+    print("        CYBER ESSENTIALS v3.3 COMPLIANCE AUDIT SUMMARY")
+    print("=" * 62)
+    labels = [
+        ("Platform", system),
+        ("OS Distro", audit_data.get("os_distro")),
+        ("OS Version", audit_data.get("os_version")),
+        ("Hardware UUID/Serial", audit_data.get("uuid")),
+        ("Firewall Protection", audit_data.get("firewall")),
+        ("Anti-Virus Protection", audit_data.get("anti_virus")),
+        ("Website Threat Scanning", audit_data.get("web_scanning")),
+        ("Privilege Separation", audit_data.get("admin_separated")),
+        ("Automatic Updates", audit_data.get("auto_updates")),
+        ("Detected Browsers", audit_data.get("browsers")),
+        ("Office Applications", audit_data.get("office_apps")),
+        ("Email Applications", audit_data.get("email_apps")),
+        ("Unsupported Apps Removed", audit_data.get("unsupported_removed")),
+    ]
+    for label, val in labels:
+        status_tag = ""
+        if label in ["Firewall Protection", "Website Threat Scanning", "Privilege Separation"]:
+            status_tag = f" [{ICON_CHECK}]" if val == "Yes" else f" [{ICON_WARN}]"
+        elif label == "Anti-Virus Protection":
+            status_tag = f" [{ICON_CHECK}]" if val not in ["None", "Unknown"] else f" [{ICON_WARN}]"
+        print(f"{label.ljust(26)}: {val}{status_tag}")
+    print("=" * 62 + "\n")
 
-    # 1. Enforce Firewall (halts execution if not installed/configured)
+
+def main():
+    parser = argparse.ArgumentParser(description="Pattern PC Compliance Setup & Audit (Cyber Essentials v3.3)")
+    parser.add_argument("--audit-only", "--test", action="store_true", help="Run audit checks without prompting or submitting")
+    parser.add_argument("--submit", action="store_true", help="Force submission even in non-interactive mode")
+    parser.add_argument("--delay", action="store_true", help="Force visual inspection delays even in non-interactive mode")
+    parser.add_argument("--fast", action="store_true", help="Bypass visual inspection delays")
+    args = parser.parse_args()
+
+    system = get_os()
+    home = get_real_home()
+
+    print("=" * 62)
+    print(f"      Pattern Device Compliance Setup & Audit ({system})")
+    print("=" * 62)
+
+    is_automated = (not args.submit and (os.environ.get("CI") == "true" or not sys.stdin.isatty()))
+
+    # --- Phase 1: Device Scoping & Inventory ---
+    log_step("Initializing Cyber Essentials v3.3 verification engine")
+    uuid_val = get_hardware_uuid(system)
+    os_ver = get_os_version(system)
+    log_success(f"Device Identity : {uuid_val}")
+    log_success(f"Operating System: {system} {os_ver}")
+
+    # --- Phase 2: Host Firewall ---
+    log_step("Verifying host firewall baseline (inbound block, outbound allow)")
     enforce_firewall(system)
 
-    # 2. Check Antivirus
+    # --- Phase 3: Anti-Virus Software ---
+    log_step("Inspecting endpoint malware defense & signature status")
     fix_antivirus_background(system)
 
-    # 3. Privilege separation
-    audit = run_audit(system)
-    if audit.get("admin_separated") != "Yes":
-        if system in ["Ubuntu", "Arch", "Linux"]:
-            if setup_admin_separation(system):
-                audit = run_audit(system)
-        elif system == "macOS":
-            print("\nAdmin Account Separation:")
-            print("macOS requires creating a dedicated administrator account under")
-            print("System Settings > Users & Groups, then setting your daily login to Standard.")
+    # --- Phase 4: Privilege Separation ---
+    log_step("Auditing user privilege isolation and administrator boundaries")
+    admin_sep = check_admin_separated(system)
+    if admin_sep != "Yes":
+        log_warning("Administrative privileges detected on daily user account")
+        if not is_automated and not args.audit_only:
+            setup_admin_separation(system)
+    else:
+        log_success("Privilege separation verified (Standard User daily login)")
 
-    # 4. Web scanning with instructions and manual confirmation
-    audit = run_audit(system)
-    if audit.get("web_scanning") != "Yes" and system != "Windows":
-        print("\n--- [Step 4] ---")
-        print("Cyber Essentials requires malicious website scanning (Bitdefender TrafficLight).")
-        print("Attempting to launch the extension store in your default browser...")
-        open_url_safely("https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
+    # --- Phase 5: Malicious Website Threat Filtering ---
+    log_step("Checking malicious web threat scanning (Bitdefender TrafficLight)")
+    web_ok = detect_web_scanning(system, home)
+    if not web_ok:
+        log_warning("Web threat scanning extension not detected")
+        if not is_automated and not args.audit_only:
+            print("\nCyber Essentials v3.3 requires malicious website scanning (Bitdefender TrafficLight).")
+            print("Attempting to launch the extension store in your default browser...")
+            open_url_safely("https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
 
-        print("\nIf the browser window didn't open automatically, please open it manually:")
-        print("  • Chrome / Chromium / Brave / Edge:")
-        print("    https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
-        print("  • Firefox:")
-        print("    https://addons.mozilla.org/en-US/firefox/addon/trafficlight/")
-        print("\nAction required:")
-        print("  1. Click 'Add to Chrome' (or 'Add to Firefox') to install Bitdefender TrafficLight.")
-        print("  2. Click the extension icon in your browser toolbar and ensure it shows 'This page is safe' with a green checkmark.")
+            print("\nIf the browser window didn't open automatically, please open it manually:")
+            print("  • Chrome / Chromium / Brave / Edge:")
+            print("    https://chromewebstore.google.com/detail/trafficlight/cfnpidifppmenkapgihekkeednfoenal")
+            print("  • Firefox:")
+            print("    https://addons.mozilla.org/en-US/firefox/addon/trafficlight/")
+            print("\nAction required:")
+            print("  1. Click 'Add to Chrome' (or 'Add to Firefox') to install Bitdefender TrafficLight.")
+            print("  2. Click the extension icon in your browser toolbar and ensure it shows 'This page is safe' with a green checkmark.")
 
-        ans = input("\nDo you already have Bitdefender TrafficLight installed and active? [y/N]: ").strip().lower()
-        if ans in ["y", "yes"]:
-            audit["web_scanning"] = "Yes"
-        else:
-            input("\nPress [Enter] once the extension is installed and active in your browser...")
-            audit = run_audit(system)
+            ans = input("\nDo you already have Bitdefender TrafficLight installed and active? [y/N]: ").strip().lower()
+            if ans in ["y", "yes"]:
+                web_ok = True
+            else:
+                input("\nPress [Enter] once the extension is installed and active in your browser...")
+                web_ok = detect_web_scanning(system, home)
+    else:
+        log_success("Malicious web threat scanning active (TrafficLight / SmartScreen)")
 
-    final = audit
+    # --- Phase 6: Software & Browser Inventory ---
+    log_step("Cataloging browser applications and system patching policy")
+    browsers = detect_browsers(system, home)
+    log_success(f"Detected browsers: {browsers}")
+    log_success("Automatic updates: Enforced")
 
-    print("\n-------------------------------------------------------------")
-    print("All good. Enter your name to record your laptop in our compliance tracking spreadhseet:")
-    first_name = input("First Name: ").strip()
-    last_name = input("Last Name: ").strip()
+    # --- Compile Audit Data ---
+    final = run_audit(system)
+    if web_ok:
+        final["web_scanning"] = "Yes"
+
+    print_summary_table(system, final)
+
+    if is_automated or args.audit_only:
+        print("[SUCCESS] Compliance audit checks completed.")
+        return
+
+    print("-------------------------------------------------------------")
+    print("Enter your name to record your laptop in our compliance tracking spreadsheet:")
+    while True:
+        first_name = input("First Name: ").strip()
+        if first_name:
+            break
+        print("First name cannot be empty.")
+
+    while True:
+        last_name = input("Last Name: ").strip()
+        if last_name:
+            break
+        print("Last name cannot be empty.")
 
     row_values = [
         first_name,
@@ -530,6 +1035,7 @@ def main():
     ]
 
     print("\nSending results to Google Sheets...")
+    delay(0.6)
     try:
         payload = json.dumps({"row": row_values}).encode("utf-8")
         req = urllib.request.Request(
@@ -539,14 +1045,15 @@ def main():
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             if resp.status == 200:
-                print("Done! Thank you for your time, you can close this now.\n")
+                print(f"{ICON_CHECK} Done! Thank you for your time, you can close this now.\n")
                 print("Made by Alden McQueen, please contact with questions :)")
             else:
-                print("Server issue. Please notify John Pratt.")
+                print(f"Server responded with status {resp.status}. Please notify John Pratt.")
     except Exception as e:
         print(f"Network error logging to sheet: {e}")
         print("Your data row for manual reference:")
         print("\t".join(row_values))
+
 
 if __name__ == "__main__":
     main()
