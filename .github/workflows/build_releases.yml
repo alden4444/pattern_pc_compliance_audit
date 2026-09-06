@@ -1,0 +1,60 @@
+name: Build Compliance Audit Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bin_name: PatternComplianceAudit-windows.exe
+            dist_path: dist/PatternComplianceAudit-windows.exe
+            pyinstaller_cmd: pyinstaller --onefile --name PatternComplianceAudit-windows Pattern_PC_Compliance_Audit.py
+          - os: macos-latest
+            bin_name: PatternComplianceAudit-macos
+            dist_path: dist/PatternComplianceAudit-macos
+            pyinstaller_cmd: pyinstaller --onefile --name PatternComplianceAudit-macos Pattern_PC_Compliance_Audit.py
+          - os: ubuntu-latest
+            bin_name: PatternComplianceAudit-linux
+            dist_path: dist/PatternComplianceAudit-linux
+            pyinstaller_cmd: pyinstaller --onefile --name PatternComplianceAudit-linux Pattern_PC_Compliance_Audit.py
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build Standalone Binary
+        run: ${{ matrix.pyinstaller_cmd }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: ${{ matrix.dist_path }}
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ matrix.dist_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
